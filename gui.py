@@ -15,6 +15,7 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
 from PyQt6.QtCore import QTimer, QThread, pyqtSignal, Qt, QSize
 from PyQt6.QtGui import QFont, QIcon, QPalette, QColor, QPixmap, QPainter
 from main import RobloxManager, ProcessManager, GameLauncher
+from cookie_extractor import CookieExtractor
 
 class ConfigManager:
     """Robust configuration manager that saves to AppData/JARAM folder"""
@@ -763,6 +764,7 @@ class UserManagementDialog(QDialog):
         self.setModal(True)
         self.resize(800, 500)
         self.config_manager = ConfigManager()
+        self.cookie_extractor = CookieExtractor(self)
         self.setup_ui()
         self.load_users()
         self.original_config = {}
@@ -801,9 +803,18 @@ class UserManagementDialog(QDialog):
         self.place_input.setPlaceholderText("Enter place/game name (optional)")
         add_layout.addRow("Place:", self.place_input)
 
+        cookie_layout = QHBoxLayout()
         self.cookie_input = QLineEdit()
         self.cookie_input.setPlaceholderText("Enter .ROBLOSECURITY cookie")
-        add_layout.addRow("Cookie:", self.cookie_input)
+        cookie_layout.addWidget(self.cookie_input)
+
+        self.browser_login_btn = QPushButton("Login with Browser")
+        self.browser_login_btn.setMaximumWidth(150)
+        self.browser_login_btn.setToolTip("Open browser to login and automatically extract cookie")
+        self.browser_login_btn.clicked.connect(self.extract_cookie_from_browser)
+        cookie_layout.addWidget(self.browser_login_btn)
+
+        add_layout.addRow("Cookie:", cookie_layout)
 
         add_btn = QPushButton("Add User")
         add_btn.clicked.connect(self.add_user)
@@ -1014,9 +1025,18 @@ class UserManagementDialog(QDialog):
         place_edit.setPlaceholderText("Enter place/game name")
         form_layout.addRow("Place:", place_edit)
 
+        cookie_edit_layout = QHBoxLayout()
         cookie_edit = QLineEdit(current_cookie)
         cookie_edit.setPlaceholderText("Enter .ROBLOSECURITY cookie")
-        form_layout.addRow("Cookie:", cookie_edit)
+        cookie_edit_layout.addWidget(cookie_edit)
+
+        browser_login_edit_btn = QPushButton("Login with Browser")
+        browser_login_edit_btn.setMaximumWidth(150)
+        browser_login_edit_btn.setToolTip("Open browser to login and automatically extract cookie")
+        browser_login_edit_btn.clicked.connect(lambda: self._extract_cookie_for_edit_dialog(cookie_edit, browser_login_edit_btn, dialog))
+        cookie_edit_layout.addWidget(browser_login_edit_btn)
+
+        form_layout.addRow("Cookie:", cookie_edit_layout)
 
         layout.addLayout(form_layout)
 
@@ -1087,6 +1107,84 @@ class UserManagementDialog(QDialog):
         user_id = user_id_item.text()
         self.delete_user_by_id(user_id)
 
+    def extract_cookie_from_browser(self):
+        """Extract cookie using browser automation"""
+        try:
+
+            self.browser_login_btn.setEnabled(False)
+            self.browser_login_btn.setText("Extracting...")
+
+            self.cookie_extractor.extract_cookie_async(
+                callback=self._on_cookie_extraction_complete,
+                parent_widget=self
+            )
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to start cookie extraction: {str(e)}")
+            self._reset_browser_button()
+
+    def _on_cookie_extraction_complete(self, cookie: str):
+        """Handle completion of cookie extraction"""
+        try:
+            if cookie:
+
+                self.cookie_input.setText(cookie)
+                QMessageBox.information(self, "Success",
+                                      "Cookie extracted successfully!\n\n"
+                                      "The cookie has been automatically filled in the input field.")
+            else:
+
+                QMessageBox.information(self, "Extraction Cancelled",
+                                      "Cookie extraction was cancelled or failed.\n\n"
+                                      "You can try again or enter the cookie manually.")
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Error handling extracted cookie: {str(e)}")
+        finally:
+            self._reset_browser_button()
+
+    def _reset_browser_button(self):
+        """Reset the browser login button to its original state"""
+        self.browser_login_btn.setEnabled(True)
+        self.browser_login_btn.setText("Login with Browser")
+
+    def _extract_cookie_for_edit_dialog(self, cookie_edit_widget, button_widget, parent_dialog):
+        """Extract cookie for edit dialog"""
+        try:
+
+            button_widget.setEnabled(False)
+            button_widget.setText("Extracting...")
+
+            def edit_dialog_callback(cookie: str):
+                try:
+                    if cookie:
+
+                        cookie_edit_widget.setText(cookie)
+                        QMessageBox.information(parent_dialog, "Success",
+                                              "Cookie extracted successfully!\n\n"
+                                              "The cookie has been automatically filled in the input field.")
+                    else:
+
+                        QMessageBox.information(parent_dialog, "Extraction Cancelled",
+                                              "Cookie extraction was cancelled or failed.\n\n"
+                                              "You can try again or enter the cookie manually.")
+                except Exception as e:
+                    QMessageBox.critical(parent_dialog, "Error", f"Error handling extracted cookie: {str(e)}")
+                finally:
+
+                    button_widget.setEnabled(True)
+                    button_widget.setText("Login with Browser")
+
+            self.cookie_extractor.extract_cookie_async(
+                callback=edit_dialog_callback,
+                parent_widget=parent_dialog
+            )
+
+        except Exception as e:
+            QMessageBox.critical(parent_dialog, "Error", f"Failed to start cookie extraction: {str(e)}")
+
+            button_widget.setEnabled(True)
+            button_widget.setText("Login with Browser")
+
     def save_and_close(self):
         """Save users to config file and close"""
         if self.config_manager.save_users(self.original_config):
@@ -1099,8 +1197,6 @@ class UserManagementDialog(QDialog):
         else:
             QMessageBox.critical(self, "Error",
                                "Failed to save user configuration. Please check the logs for details.")
-
-
 
 class RobloxManagerGUI(QMainWindow):
     """Main GUI window for Roblox Manager"""
@@ -1188,8 +1284,6 @@ class RobloxManagerGUI(QMainWindow):
 
         exit_action = file_menu.addAction("Exit")
         exit_action.triggered.connect(self.close)
-
-
 
         help_menu = menubar.addMenu("Help")
 
@@ -1551,7 +1645,7 @@ class RobloxManagerGUI(QMainWindow):
         discord_btn = QPushButton("https://discord.gg/6cuCu6ymkX")
         discord_btn.setStyleSheet(f"""
             QPushButton {{
-                background-color: #5865F2;
+                background-color: 
                 color: white;
                 border: none;
                 padding: 12px 20px;
@@ -1560,7 +1654,7 @@ class RobloxManagerGUI(QMainWindow):
                 text-align: left;
             }}
             QPushButton:hover {{
-                background-color: #4752C4;
+                background-color: 
             }}
         """)
         discord_btn.clicked.connect(lambda: self.open_url("https://discord.gg/6cuCu6ymkX"))
