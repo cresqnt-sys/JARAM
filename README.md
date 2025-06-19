@@ -9,7 +9,7 @@
 
 ### Multi-Account
 - Manage unlimited Roblox accounts
-- Bypasses Roblox's Multi Account/Instance limit by reconnecting per process on crash or disconenect.
+- Bypasses Roblox's Multi Account/Instance limit by reconnecting per process on crash or disconnect.
 - Automatic session launching and monitoring
 - Consolidated and easy to use interface
 

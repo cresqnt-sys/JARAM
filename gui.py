@@ -11,11 +11,36 @@ from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                             QSpinBox, QTextEdit, QGroupBox,
                             QProgressBar, QComboBox, QCheckBox, QSplitter,
                             QHeaderView, QMessageBox, QDialog, QDialogButtonBox,
-                            QFormLayout, QScrollArea, QFrame)
+                            QFormLayout, QScrollArea, QFrame, QSizePolicy)
 from PyQt6.QtCore import QTimer, QThread, pyqtSignal, Qt, QSize
 from PyQt6.QtGui import QFont, QIcon, QPalette, QColor, QPixmap, QPainter
 from main import RobloxManager, ProcessManager, GameLauncher
 from cookie_extractor import CookieExtractor
+
+def _get_icon_path():
+    """Get the path to the icon file, handling both development and built executable"""
+
+    icon_path = "JARAM.ico"
+    if os.path.exists(icon_path):
+        print(f"Found icon at: {icon_path}")
+        return icon_path
+
+    if hasattr(sys, '_MEIPASS'):
+        icon_path = os.path.join(sys._MEIPASS, "JARAM.ico")
+        print(f"Checking PyInstaller path: {icon_path}")
+        if os.path.exists(icon_path):
+            print(f"Found icon at: {icon_path}")
+            return icon_path
+
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    icon_path = os.path.join(script_dir, "JARAM.ico")
+    print(f"Checking script directory: {icon_path}")
+    if os.path.exists(icon_path):
+        print(f"Found icon at: {icon_path}")
+        return icon_path
+
+    print("Icon file not found in any location")
+    return None
 
 class ConfigManager:
     """Robust configuration manager that saves to AppData/JARAM folder"""
@@ -30,16 +55,8 @@ class ConfigManager:
         self._ensure_directories()
 
         self.default_settings = {
-            "place_id": "85896571713843",
             "window_limit": 1,
-            "excluded_pid": 0,
-            "check_intervals": {
-                "window": 3.0,
-                "presence": 1.5,
-                "cleanup": 30.0
-            },
             "timeouts": {
-                "relaunch": 20,
                 "offline": 35,
                 "launch_delay": 4
             }
@@ -344,10 +361,12 @@ class ModernStyle:
             background-color: {ModernStyle.PRIMARY};
             color: {ModernStyle.TEXT_PRIMARY};
             border: none;
-            padding: 10px 20px;
+            padding: 8px 16px;
             border-radius: 6px;
             font-weight: 500;
             min-width: 80px;
+            min-height: 28px;
+            font-size: 13px;
         }}
 
         QPushButton:hover {{
@@ -756,146 +775,514 @@ class WorkerThread(QThread):
         self.log_signal.emit("Roblox Manager stopped")
 
 class UserManagementDialog(QDialog):
-    """Dialog for managing user accounts"""
+    """Completely redesigned dialog for managing user accounts with improved layout and functionality"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.setWindowTitle("User Account Management")
         self.setModal(True)
-        self.resize(800, 500)
+
+        self.resize(1400, 850)
+        self.setMinimumSize(1200, 700)
         self.config_manager = ConfigManager()
         self.cookie_extractor = CookieExtractor(self)
+        self.selected_user_id = None
         self.setup_ui()
         self.load_users()
 
     def setup_ui(self):
-        layout = QVBoxLayout(self)
+        """Setup the completely redesigned user interface"""
+        main_layout = QVBoxLayout(self)
+        main_layout.setSpacing(15)
+        main_layout.setContentsMargins(20, 20, 20, 20)
 
-        self.user_table = QTableWidget()
-        self.user_table.setColumnCount(6)
-        self.user_table.setHorizontalHeaderLabels(["User ID", "Username", "Private Server Link", "Place", "Cookie", "Actions"])
-        header = self.user_table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)  
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)  
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)           
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)  
-        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Stretch)           
-        header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)  
-        layout.addWidget(self.user_table)
+        main_splitter = QSplitter(Qt.Orientation.Horizontal)
+        main_splitter.setChildrenCollapsible(False)
 
-        add_group = QGroupBox("Add New User")
-        add_layout = QFormLayout(add_group)
+        left_panel = self._create_user_list_panel()
+        main_splitter.addWidget(left_panel)
 
-        self.user_id_input = QLineEdit()
-        self.user_id_input.setPlaceholderText("Enter user ID (e.g., 123456789)")
-        add_layout.addRow("User ID:", self.user_id_input)
+        right_panel = self._create_user_form_panel()
+        main_splitter.addWidget(right_panel)
 
-        self.username_input = QLineEdit()
-        self.username_input.setPlaceholderText("Enter username (e.g., PlayerName)")
-        add_layout.addRow("Username:", self.username_input)
+        main_splitter.setSizes([980, 420])
+        main_layout.addWidget(main_splitter)
 
-        self.private_server_input = QLineEdit()
-        self.private_server_input.setPlaceholderText("Enter private server link (required) - Supports both direct links and share links")
-        add_layout.addRow("Private Server Link:", self.private_server_input)
-
-        self.place_input = QLineEdit()
-        self.place_input.setPlaceholderText("Enter place/game name (optional)")
-        add_layout.addRow("Place:", self.place_input)
-
-        cookie_layout = QHBoxLayout()
-        self.cookie_input = QLineEdit()
-        self.cookie_input.setPlaceholderText("Enter .ROBLOSECURITY cookie")
-        cookie_layout.addWidget(self.cookie_input)
-
-        self.browser_login_btn = QPushButton("Login with Browser")
-        self.browser_login_btn.setMaximumWidth(150)
-        self.browser_login_btn.setToolTip("Open browser to login and automatically extract cookie")
-        self.browser_login_btn.clicked.connect(self.extract_cookie_from_browser)
-        cookie_layout.addWidget(self.browser_login_btn)
-
-        add_layout.addRow("Cookie:", cookie_layout)
-
-        add_btn = QPushButton("Add User")
-        add_btn.clicked.connect(self.add_user)
-        add_layout.addRow(add_btn)
-
-        layout.addWidget(add_group)
-
-        controls_layout = QHBoxLayout()
-
-        refresh_btn = QPushButton("Refresh Table")
-        refresh_btn.clicked.connect(self.refresh_user_table)
-        controls_layout.addWidget(refresh_btn)
-
-        controls_layout.addStretch()
-
-        layout.addLayout(controls_layout)
+        controls_layout = self._create_controls_layout()
+        main_layout.addLayout(controls_layout)
 
         button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         button_box.accepted.connect(self.save_and_close)
         button_box.rejected.connect(self.reject)
-        layout.addWidget(button_box)
+        main_layout.addWidget(button_box)
+
+    def _create_user_list_panel(self):
+        """Create the left panel with user list using QGridLayout for better control"""
+        panel = QWidget()
+        panel_layout = QVBoxLayout(panel)
+        panel_layout.setContentsMargins(0, 0, 10, 0)
+
+        header_label = QLabel("User Accounts")
+        header_label.setStyleSheet(f"""
+            QLabel {{
+                font-size: 16px;
+                font-weight: bold;
+                color: {ModernStyle.TEXT_PRIMARY};
+                padding: 10px 0;
+                border-bottom: 2px solid {ModernStyle.PRIMARY};
+            }}
+        """)
+        panel_layout.addWidget(header_label)
+
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        scroll_area.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        scroll_area.setStyleSheet(f"""
+            QScrollArea {{
+                border: 1px solid {ModernStyle.BORDER};
+                border-radius: 8px;
+                background-color: {ModernStyle.SURFACE};
+            }}
+        """)
+
+        self.user_list_widget = QWidget()
+        self.user_list_layout = QVBoxLayout(self.user_list_widget)
+        self.user_list_layout.setSpacing(8)
+        self.user_list_layout.setContentsMargins(15, 15, 15, 15)
+
+        scroll_area.setWidget(self.user_list_widget)
+        panel_layout.addWidget(scroll_area)
+
+        return panel
+
+    def _create_user_form_panel(self):
+        """Create the right panel with user form"""
+        panel = QWidget()
+        panel_layout = QVBoxLayout(panel)
+        panel_layout.setContentsMargins(10, 0, 0, 0)
+
+        self.form_header = QLabel("Add New User")
+        self.form_header.setStyleSheet(f"""
+            QLabel {{
+                font-size: 16px;
+                font-weight: bold;
+                color: {ModernStyle.TEXT_PRIMARY};
+                padding: 10px 0;
+                border-bottom: 2px solid {ModernStyle.SECONDARY};
+            }}
+        """)
+        panel_layout.addWidget(self.form_header)
+
+        form_container = QWidget()
+        form_container.setStyleSheet(f"""
+            QWidget {{
+                background-color: {ModernStyle.SURFACE};
+                border: 1px solid {ModernStyle.BORDER};
+                border-radius: 8px;
+                padding: 15px;
+            }}
+        """)
+        form_layout = QVBoxLayout(form_container)
+        form_layout.setSpacing(12)
+
+        self.user_id_input = QLineEdit()
+        self.user_id_input.setPlaceholderText("Enter user ID (e.g., 123456789)")
+        self.user_id_input.setStyleSheet(self._get_input_style())
+        form_layout.addWidget(QLabel("User ID:"))
+        form_layout.addWidget(self.user_id_input)
+
+        self.username_input = QLineEdit()
+        self.username_input.setPlaceholderText("Enter username (e.g., PlayerName)")
+        self.username_input.setStyleSheet(self._get_input_style())
+        form_layout.addWidget(QLabel("Username:"))
+        form_layout.addWidget(self.username_input)
+
+        self.private_server_input = QLineEdit()
+        self.private_server_input.setPlaceholderText("Enter private server link (required)")
+        self.private_server_input.setStyleSheet(self._get_input_style())
+        form_layout.addWidget(QLabel("Private Server Link:"))
+        form_layout.addWidget(self.private_server_input)
+
+        self.place_input = QLineEdit()
+        self.place_input.setPlaceholderText("Enter place/game name (optional)")
+        self.place_input.setStyleSheet(self._get_input_style())
+        form_layout.addWidget(QLabel("Place:"))
+        form_layout.addWidget(self.place_input)
+
+        form_layout.addWidget(QLabel("Cookie:"))
+        cookie_layout = QHBoxLayout()
+        self.cookie_input = QLineEdit()
+        self.cookie_input.setPlaceholderText("Enter .ROBLOSECURITY cookie")
+        self.cookie_input.setStyleSheet(self._get_input_style())
+        cookie_layout.addWidget(self.cookie_input)
+
+        self.browser_login_btn = QPushButton("Login with Browser")
+        self.browser_login_btn.setStyleSheet(self._get_secondary_button_style())
+        self.browser_login_btn.setToolTip("Open browser to login and automatically extract cookie")
+        self.browser_login_btn.clicked.connect(self.extract_cookie_from_browser)
+        cookie_layout.addWidget(self.browser_login_btn)
+        form_layout.addLayout(cookie_layout)
+
+        button_layout = QHBoxLayout()
+        self.add_btn = QPushButton("Add User")
+        self.add_btn.setStyleSheet(self._get_primary_button_style())
+        self.add_btn.clicked.connect(self.add_user)
+        button_layout.addWidget(self.add_btn)
+
+        self.update_btn = QPushButton("Update User")
+        self.update_btn.setStyleSheet(self._get_primary_button_style())
+        self.update_btn.clicked.connect(self.update_user)
+        self.update_btn.hide()  
+        button_layout.addWidget(self.update_btn)
+
+        self.cancel_edit_btn = QPushButton("Cancel Edit")
+        self.cancel_edit_btn.setStyleSheet(self._get_secondary_button_style())
+        self.cancel_edit_btn.clicked.connect(self.cancel_edit)
+        self.cancel_edit_btn.hide()  
+        button_layout.addWidget(self.cancel_edit_btn)
+
+        form_layout.addLayout(button_layout)
+        panel_layout.addWidget(form_container)
+        panel_layout.addStretch()
+
+        return panel
+
+    def _create_controls_layout(self):
+        """Create bottom controls layout"""
+        controls_layout = QHBoxLayout()
+
+        refresh_btn = QPushButton("Refresh List")
+        refresh_btn.setStyleSheet(self._get_secondary_button_style())
+        refresh_btn.clicked.connect(self.refresh_user_list)
+        controls_layout.addWidget(refresh_btn)
+
+        controls_layout.addStretch()
+
+        return controls_layout
+
+    def _get_input_style(self):
+        """Get consistent input field styling"""
+        return f"""
+            QLineEdit {{
+                background-color: {ModernStyle.SURFACE};
+                border: 2px solid {ModernStyle.BORDER};
+                border-radius: 6px;
+                padding: 10px 12px;
+                color: {ModernStyle.TEXT_PRIMARY};
+                font-size: 13px;
+                min-height: 20px;
+            }}
+            QLineEdit:focus {{
+                border-color: {ModernStyle.PRIMARY};
+            }}
+        """
+
+    def _get_primary_button_style(self):
+        """Get primary button styling"""
+        return f"""
+            QPushButton {{
+                background-color: {ModernStyle.PRIMARY};
+                color: {ModernStyle.TEXT_PRIMARY};
+                border: none;
+                padding: 10px 20px;
+                border-radius: 6px;
+                font-weight: 600;
+                font-size: 13px;
+                min-height: 20px;
+                min-width: 100px;
+            }}
+            QPushButton:hover {{
+                background-color: {ModernStyle.PRIMARY_VARIANT};
+            }}
+            QPushButton:pressed {{
+                background-color: 
+            }}
+        """
+
+    def _get_secondary_button_style(self):
+        """Get secondary button styling"""
+        return f"""
+            QPushButton {{
+                background-color: {ModernStyle.SURFACE_VARIANT};
+                color: {ModernStyle.TEXT_PRIMARY};
+                border: 1px solid {ModernStyle.BORDER};
+                padding: 10px 20px;
+                border-radius: 6px;
+                font-weight: 500;
+                font-size: 13px;
+                min-height: 20px;
+                min-width: 100px;
+            }}
+            QPushButton:hover {{
+                background-color: {ModernStyle.BORDER};
+            }}
+        """
+
+    def _get_action_button_style(self, color_type="primary"):
+        """Get action button styling for user cards with improved visibility"""
+        if color_type == "danger":
+            bg_color = ModernStyle.ERROR
+            hover_color = "#dc2626"
+            pressed_color = "#b91c1c"
+        else:
+            bg_color = ModernStyle.PRIMARY
+            hover_color = ModernStyle.PRIMARY_VARIANT
+            pressed_color = "#3730a3"
+
+        return f"""
+            QPushButton {{
+                background-color: {bg_color};
+                color: white;
+                border: none;
+                padding: 8px 16px;
+                border-radius: 4px;
+                font-weight: 600;
+                font-size: 12px;
+                min-width: 70px;
+                max-width: 80px;
+                min-height: 30px;
+                max-height: 32px;
+            }}
+            QPushButton:hover {{
+                background-color: {hover_color};
+            }}
+            QPushButton:pressed {{
+                background-color: {pressed_color};
+            }}
+        """
 
     def load_users(self):
         """Load users from config file"""
         try:
             self.original_config = self.config_manager.load_users()
-            self.refresh_user_table()
+            self.refresh_user_list()
         except Exception as e:
             QMessageBox.warning(self, "Error", f"Failed to load users: {e}")
             self.original_config = {}
-            self.refresh_user_table()
+            self.refresh_user_list()
 
-    def refresh_user_table(self):
-        """Refresh the user table display"""
-        self.user_table.setRowCount(len(self.original_config))
+    def refresh_user_list(self):
+        """Refresh the user list display with modern card-based layout"""
 
-        for row, (user_id, user_info) in enumerate(self.original_config.items()):
+        for i in reversed(range(self.user_list_layout.count())):
+            child = self.user_list_layout.itemAt(i).widget()
+            if child:
+                child.setParent(None)
 
-            self.user_table.setItem(row, 0, QTableWidgetItem(user_id))
+        for user_id, user_info in self.original_config.items():
+            user_card = self._create_user_card(user_id, user_info)
+            self.user_list_layout.addWidget(user_card)
 
-            if isinstance(user_info, dict):
-                username = user_info.get("username", f"User_{user_id}")
-                private_server_link = user_info.get("private_server_link", "")
-                place = user_info.get("place", "")
-                cookie = user_info.get("cookie", "")
+        self.user_list_layout.addStretch()
+
+    def _create_user_card(self, user_id, user_info):
+        """Create a modern user card widget with proper text display"""
+        card = QWidget()
+        card.setStyleSheet(f"""
+            QWidget {{
+                background-color: {ModernStyle.SURFACE_VARIANT};
+                border: 1px solid {ModernStyle.BORDER};
+                border-radius: 8px;
+                padding: 12px;
+                margin: 2px;
+            }}
+            QWidget:hover {{
+                border-color: {ModernStyle.PRIMARY};
+                background-color: {ModernStyle.SURFACE};
+            }}
+        """)
+
+        card.setMinimumHeight(100)
+        card.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+
+        layout = QVBoxLayout(card)
+        layout.setSpacing(6)
+        layout.setContentsMargins(8, 8, 8, 8)
+
+        if isinstance(user_info, dict):
+            username = user_info.get("username", f"User_{user_id}")
+            private_server_link = user_info.get("private_server_link", "")
+            place = user_info.get("place", "")
+            cookie = user_info.get("cookie", "")
+        else:
+            username = f"User_{user_id}"
+            private_server_link = ""
+            place = ""
+            cookie = user_info
+
+        header_layout = QVBoxLayout()
+        header_layout.setSpacing(2)
+
+        user_id_label = QLabel(f"ID: {user_id}")
+        user_id_label.setStyleSheet(f"""
+            QLabel {{
+                font-weight: bold;
+                font-size: 14px;
+                color: {ModernStyle.PRIMARY};
+                margin: 0px;
+                padding: 0px;
+            }}
+        """)
+        user_id_label.setWordWrap(True)
+        header_layout.addWidget(user_id_label)
+
+        username_label = QLabel(f"User: {username}")
+        username_label.setStyleSheet(f"""
+            QLabel {{
+                font-size: 12px;
+                color: {ModernStyle.TEXT_PRIMARY};
+                font-weight: 500;
+                margin: 0px;
+                padding: 0px;
+            }}
+        """)
+        username_label.setWordWrap(True)
+        header_layout.addWidget(username_label)
+
+        layout.addLayout(header_layout)
+
+        info_layout = QVBoxLayout()
+        info_layout.setSpacing(2)
+
+        if place:
+            place_label = QLabel(f"Place: {place}")
+            place_label.setStyleSheet(f"""
+                QLabel {{
+                    color: {ModernStyle.TEXT_SECONDARY};
+                    font-size: 11px;
+                    margin: 0px;
+                    padding: 0px;
+                }}
+            """)
+            place_label.setWordWrap(True)
+            info_layout.addWidget(place_label)
+
+        if private_server_link:
+
+            if "roblox.com/share" in private_server_link:
+                server_text = "Share Link: " + private_server_link.split("?")[1][:25] + "..."
+            elif len(private_server_link) > 35:
+                server_text = "Server: " + private_server_link[:35] + "..."
             else:
+                server_text = f"Server: {private_server_link}"
 
-                username = f"User_{user_id}"
-                private_server_link = ""
-                place = ""
-                cookie = user_info
+            server_label = QLabel(server_text)
+            server_label.setStyleSheet(f"""
+                QLabel {{
+                    color: {ModernStyle.TEXT_SECONDARY};
+                    font-size: 11px;
+                    margin: 0px;
+                    padding: 0px;
+                }}
+            """)
+            server_label.setWordWrap(True)
+            server_label.setToolTip(private_server_link)  
+            info_layout.addWidget(server_label)
 
-            self.user_table.setItem(row, 1, QTableWidgetItem(username))
+        layout.addLayout(info_layout)
 
-            display_private_server = private_server_link[:30] + "..." if len(private_server_link) > 30 else private_server_link
-            self.user_table.setItem(row, 2, QTableWidgetItem(display_private_server))
+        button_layout = QHBoxLayout()
+        button_layout.setSpacing(6)
+        button_layout.setContentsMargins(0, 4, 0, 0)
 
-            self.user_table.setItem(row, 3, QTableWidgetItem(place))
+        edit_btn = QPushButton("Edit")
+        edit_btn.setStyleSheet(self._get_action_button_style("primary"))
+        edit_btn.clicked.connect(lambda: self.edit_user_card(user_id))
+        button_layout.addWidget(edit_btn)
 
-            display_cookie = cookie[:20] + "..." if len(cookie) > 20 else cookie
-            self.user_table.setItem(row, 4, QTableWidgetItem(display_cookie))
+        delete_btn = QPushButton("Delete")
+        delete_btn.setStyleSheet(self._get_action_button_style("danger"))
+        delete_btn.clicked.connect(lambda: self.delete_user_by_id(user_id))
+        button_layout.addWidget(delete_btn)
 
-            actions_widget = QWidget()
-            actions_layout = QHBoxLayout(actions_widget)
-            actions_layout.setContentsMargins(4, 4, 4, 4)
-            actions_layout.setSpacing(4)
+        button_layout.addStretch()
+        layout.addLayout(button_layout)
 
-            edit_btn = QPushButton("Edit")
-            edit_btn.setMaximumWidth(60)
-            edit_btn.clicked.connect(lambda checked, uid=user_id: self.edit_user(uid))
-            actions_layout.addWidget(edit_btn)
+        return card
 
-            delete_btn = QPushButton("Delete")
-            delete_btn.setProperty("class", "danger")
-            delete_btn.setMaximumWidth(70)
-            delete_btn.clicked.connect(lambda checked, uid=user_id: self.delete_user_by_id(uid))
-            actions_layout.addWidget(delete_btn)
+    def edit_user_card(self, user_id):
+        """Edit user using the form panel"""
+        if user_id not in self.original_config:
+            QMessageBox.warning(self, "Error", f"User {user_id} not found!")
+            return
 
-            self.user_table.setCellWidget(row, 5, actions_widget)
+        self.selected_user_id = user_id
+        self.form_header.setText(f"Edit User {user_id}")
+
+        user_info = self.original_config[user_id]
+        if isinstance(user_info, dict):
+            self.user_id_input.setText(user_id)
+            self.user_id_input.setEnabled(False)  
+            self.username_input.setText(user_info.get("username", f"User_{user_id}"))
+            self.private_server_input.setText(user_info.get("private_server_link", ""))
+            self.place_input.setText(user_info.get("place", ""))
+            self.cookie_input.setText(user_info.get("cookie", ""))
+        else:
+            self.user_id_input.setText(user_id)
+            self.user_id_input.setEnabled(False)
+            self.username_input.setText(f"User_{user_id}")
+            self.private_server_input.setText("")
+            self.place_input.setText("")
+            self.cookie_input.setText(user_info)
+
+        self.add_btn.hide()
+        self.update_btn.show()
+        self.cancel_edit_btn.show()
+
+    def cancel_edit(self):
+        """Cancel edit mode and return to add mode"""
+        self.selected_user_id = None
+        self.form_header.setText("Add New User")
+
+        self.user_id_input.clear()
+        self.user_id_input.setEnabled(True)
+        self.username_input.clear()
+        self.private_server_input.clear()
+        self.place_input.clear()
+        self.cookie_input.clear()
+
+        self.add_btn.show()
+        self.update_btn.hide()
+        self.cancel_edit_btn.hide()
+
+    def update_user(self):
+        """Update existing user"""
+        if not self.selected_user_id:
+            return
+
+        user_id = self.selected_user_id
+        username = self.username_input.text().strip()
+        private_server_link = self.private_server_input.text().strip()
+        place = self.place_input.text().strip()
+        cookie = self.cookie_input.text().strip()
+
+        if not username:
+            username = f"User_{user_id}"
+
+        if not private_server_link:
+            QMessageBox.warning(self, "Error", "Private server link cannot be empty!")
+            self.private_server_input.setFocus()
+            return
+
+        if not cookie:
+            QMessageBox.warning(self, "Error", "Cookie cannot be empty!")
+            self.cookie_input.setFocus()
+            return
+
+        self.original_config[user_id] = {
+            "username": username,
+            "private_server_link": private_server_link,
+            "place": place,
+            "cookie": cookie
+        }
+
+        self.refresh_user_list()
+        self.cancel_edit()
+        QMessageBox.information(self, "Success", f"User {user_id} ({username}) updated successfully!")
 
     def add_user(self):
-        """Add a new user"""
+        """Add a new user with improved validation and form handling"""
         user_id = self.user_id_input.text().strip()
         username = self.username_input.text().strip()
         private_server_link = self.private_server_input.text().strip()
@@ -904,6 +1291,16 @@ class UserManagementDialog(QDialog):
 
         if not user_id:
             QMessageBox.warning(self, "Error", "Please enter a User ID")
+            self.user_id_input.setFocus()
+            return
+
+        if not user_id.isdigit():
+            QMessageBox.warning(self, "Error", "User ID should be numeric (e.g., 123456789)")
+            self.user_id_input.setFocus()
+            return
+
+        if user_id in self.original_config:
+            QMessageBox.warning(self, "Error", f"User ID {user_id} already exists. Use Edit to modify existing users.")
             self.user_id_input.setFocus()
             return
 
@@ -917,23 +1314,11 @@ class UserManagementDialog(QDialog):
             self.cookie_input.setFocus()
             return
 
-        if not user_id.isdigit():
-            QMessageBox.warning(self, "Error", "User ID should be numeric (e.g., 123456789)")
-            self.user_id_input.setFocus()
-            return
-
         if not username:
-            username = f"User_{user_id}"  
-
-        if user_id in self.original_config:
-            QMessageBox.warning(self, "Error", f"User ID {user_id} already exists. Use Edit to modify existing users.")
-            self.user_id_input.setFocus()
-            return
+            username = f"User_{user_id}"
 
         import re
-
         pattern1 = r'roblox\.com/games/\d+/[^?]*\?privateServerLinkCode=[A-Za-z0-9_-]+'
-
         pattern2 = r'roblox\.com/share\?code=[A-Za-z0-9_-]+&type=Server'
 
         if not (re.search(pattern1, private_server_link) or re.search(pattern2, private_server_link)):
@@ -942,8 +1327,6 @@ class UserManagementDialog(QDialog):
                                        "Supported formats:\n"
                                        "• Direct Link: https://www.roblox.com/games/[ID]/[NAME]?privateServerLinkCode=[CODE]\n"
                                        "• Share Link: https://www.roblox.com/share?code=[CODE]&type=Server\n\n"
-                                       "Share links will be automatically resolved using the Roblox API when launching.\n"
-                                       "This provides direct client launching without browser interaction.\n\n"
                                        "Continue anyway?",
                                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
             if reply == QMessageBox.StandardButton.No:
@@ -973,143 +1356,16 @@ class UserManagementDialog(QDialog):
             self.place_input.clear()
             self.cookie_input.clear()
 
-            self.refresh_user_table()
+            self.refresh_user_list()
 
             QMessageBox.information(self, "Success", f"User {user_id} ({username}) added successfully!")
 
         except Exception as e:
             QMessageBox.critical(self, "Error", f"Failed to add user: {e}")
 
-    def edit_user(self, user_id):
-        """Edit an existing user"""
-        if user_id not in self.original_config:
-            QMessageBox.warning(self, "Error", f"User {user_id} not found!")
-            return
-
-        user_info = self.original_config[user_id]
-        if isinstance(user_info, dict):
-            current_username = user_info.get("username", f"User_{user_id}")
-            current_private_server_link = user_info.get("private_server_link", "")
-            current_place = user_info.get("place", "")
-            current_cookie = user_info.get("cookie", "")
-        else:
-
-            current_username = f"User_{user_id}"
-            current_private_server_link = ""
-            current_place = ""
-            current_cookie = user_info
-
-        dialog = QDialog(self)
-        dialog.setWindowTitle(f"Edit User {user_id}")
-        dialog.setModal(True)
-        dialog.resize(400, 200)
-
-        layout = QVBoxLayout(dialog)
-
-        form_layout = QFormLayout()
-
-        user_id_label = QLabel(user_id)
-        user_id_label.setStyleSheet("font-weight: bold; color: #666;")
-        form_layout.addRow("User ID:", user_id_label)
-
-        username_edit = QLineEdit(current_username)
-        username_edit.setPlaceholderText("Enter username")
-        form_layout.addRow("Username:", username_edit)
-
-        private_server_edit = QLineEdit(current_private_server_link)
-        private_server_edit.setPlaceholderText("Enter private server link")
-        form_layout.addRow("Private Server Link:", private_server_edit)
-
-        place_edit = QLineEdit(current_place)
-        place_edit.setPlaceholderText("Enter place/game name")
-        form_layout.addRow("Place:", place_edit)
-
-        cookie_edit_layout = QHBoxLayout()
-        cookie_edit = QLineEdit(current_cookie)
-        cookie_edit.setPlaceholderText("Enter .ROBLOSECURITY cookie")
-        cookie_edit_layout.addWidget(cookie_edit)
-
-        browser_login_edit_btn = QPushButton("Login with Browser")
-        browser_login_edit_btn.setMaximumWidth(150)
-        browser_login_edit_btn.setToolTip("Open browser to login and automatically extract cookie")
-        browser_login_edit_btn.clicked.connect(lambda: self._extract_cookie_for_edit_dialog(cookie_edit, browser_login_edit_btn, dialog))
-        cookie_edit_layout.addWidget(browser_login_edit_btn)
-
-        form_layout.addRow("Cookie:", cookie_edit_layout)
-
-        layout.addLayout(form_layout)
-
-        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        button_box.accepted.connect(dialog.accept)
-        button_box.rejected.connect(dialog.reject)
-        layout.addWidget(button_box)
-
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            new_username = username_edit.text().strip()
-            new_private_server_link = private_server_edit.text().strip()
-            new_place = place_edit.text().strip()
-            new_cookie = cookie_edit.text().strip()
-
-            if not new_username:
-                new_username = f"User_{user_id}"
-
-            if not new_private_server_link:
-                QMessageBox.warning(self, "Error", "Private server link cannot be empty!")
-                return
-
-            if not new_cookie:
-                QMessageBox.warning(self, "Error", "Cookie cannot be empty!")
-                return
-
-            self.original_config[user_id] = {
-                "username": new_username,
-                "private_server_link": new_private_server_link,
-                "place": new_place,
-                "cookie": new_cookie
-            }
-
-            self.refresh_user_table()
-
-            QMessageBox.information(self, "Success", f"User {user_id} updated successfully!")
-
-    def delete_user_by_id(self, user_id):
-        """Delete a user by user ID"""
-
-        user_info = self.original_config.get(user_id, {})
-        if isinstance(user_info, dict):
-            username = user_info.get("username", f"User_{user_id}")
-        else:
-            username = f"User_{user_id}"
-
-        reply = QMessageBox.question(self, "Confirm Delete",
-                                   f"Are you sure you want to delete user {user_id} ({username})?",
-                                   QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-        if reply == QMessageBox.StandardButton.Yes:
-
-            if user_id in self.original_config:
-                del self.original_config[user_id]
-
-                self.refresh_user_table()
-                QMessageBox.information(self, "Success", f"User {user_id} ({username}) deleted successfully!")
-            else:
-                QMessageBox.warning(self, "Error", f"User {user_id} not found in configuration!")
-
-    def delete_user(self, row):
-        """Delete a user by row (legacy method for compatibility)"""
-        if row >= self.user_table.rowCount():
-            return
-
-        user_id_item = self.user_table.item(row, 0)
-        if not user_id_item:
-            return
-
-        user_id = user_id_item.text()
-        self.delete_user_by_id(user_id)
-
     def extract_cookie_from_browser(self):
         """Extract cookie using browser automation"""
         try:
-
             self.browser_login_btn.setEnabled(False)
             self.browser_login_btn.setText("Extracting...")
 
@@ -1126,13 +1382,11 @@ class UserManagementDialog(QDialog):
         """Handle completion of cookie extraction"""
         try:
             if cookie:
-
                 self.cookie_input.setText(cookie)
                 QMessageBox.information(self, "Success",
                                       "Cookie extracted successfully!\n\n"
                                       "The cookie has been automatically filled in the input field.")
             else:
-
                 QMessageBox.information(self, "Extraction Cancelled",
                                       "Cookie extraction was cancelled or failed.\n\n"
                                       "You can try again or enter the cookie manually.")
@@ -1146,43 +1400,30 @@ class UserManagementDialog(QDialog):
         self.browser_login_btn.setEnabled(True)
         self.browser_login_btn.setText("Login with Browser")
 
-    def _extract_cookie_for_edit_dialog(self, cookie_edit_widget, button_widget, parent_dialog):
-        """Extract cookie for edit dialog"""
-        try:
+    def delete_user_by_id(self, user_id):
+        """Delete a user by user ID with improved confirmation"""
+        user_info = self.original_config.get(user_id, {})
+        if isinstance(user_info, dict):
+            username = user_info.get("username", f"User_{user_id}")
+        else:
+            username = f"User_{user_id}"
 
-            button_widget.setEnabled(False)
-            button_widget.setText("Extracting...")
+        reply = QMessageBox.question(self, "Confirm Delete",
+                                   f"Are you sure you want to delete user {user_id} ({username})?\n\n"
+                                   f"This action cannot be undone.",
+                                   QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
 
-            def edit_dialog_callback(cookie: str):
-                try:
-                    if cookie:
+        if reply == QMessageBox.StandardButton.Yes:
+            if user_id in self.original_config:
 
-                        cookie_edit_widget.setText(cookie)
-                        QMessageBox.information(parent_dialog, "Success",
-                                              "Cookie extracted successfully!\n\n"
-                                              "The cookie has been automatically filled in the input field.")
-                    else:
+                if self.selected_user_id == user_id:
+                    self.cancel_edit()
 
-                        QMessageBox.information(parent_dialog, "Extraction Cancelled",
-                                              "Cookie extraction was cancelled or failed.\n\n"
-                                              "You can try again or enter the cookie manually.")
-                except Exception as e:
-                    QMessageBox.critical(parent_dialog, "Error", f"Error handling extracted cookie: {str(e)}")
-                finally:
-
-                    button_widget.setEnabled(True)
-                    button_widget.setText("Login with Browser")
-
-            self.cookie_extractor.extract_cookie_async(
-                callback=edit_dialog_callback,
-                parent_widget=parent_dialog
-            )
-
-        except Exception as e:
-            QMessageBox.critical(parent_dialog, "Error", f"Failed to start cookie extraction: {str(e)}")
-
-            button_widget.setEnabled(True)
-            button_widget.setText("Login with Browser")
+                del self.original_config[user_id]
+                self.refresh_user_list()
+                QMessageBox.information(self, "Success", f"User {user_id} ({username}) deleted successfully!")
+            else:
+                QMessageBox.warning(self, "Error", f"User {user_id} not found in configuration!")
 
     def save_and_close(self):
         """Save users to config file and close"""
@@ -1212,6 +1453,10 @@ class RobloxManagerGUI(QMainWindow):
         """Setup the main user interface"""
         self.setWindowTitle("JARAM - Just Another Roblox Account Manager")
         self.setGeometry(100, 100, 1200, 800)
+
+        icon_path = _get_icon_path()
+        if icon_path and os.path.exists(icon_path):
+            self.setWindowIcon(QIcon(icon_path))
 
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
@@ -1370,15 +1615,22 @@ class RobloxManagerGUI(QMainWindow):
         ])
 
         header = self.users_table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)  
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)  
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)           
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)  
-        header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)  
-        header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)  
-        header.setSectionResizeMode(6, QHeaderView.ResizeMode.Stretch)           
-        header.setSectionResizeMode(7, QHeaderView.ResizeMode.ResizeToContents)  
-        header.setSectionResizeMode(8, QHeaderView.ResizeMode.ResizeToContents)  
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)  
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)  
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(6, QHeaderView.ResizeMode.Fixed)  
+        header.setSectionResizeMode(7, QHeaderView.ResizeMode.Stretch)  
+        header.setSectionResizeMode(8, QHeaderView.ResizeMode.Fixed)  
+
+        self.users_table.setColumnWidth(2, 200)  
+        self.users_table.setColumnWidth(3, 100)  
+        self.users_table.setColumnWidth(6, 100)  
+        self.users_table.setColumnWidth(8, 160)  
+
+        self.users_table.verticalHeader().setDefaultSectionSize(60)
 
         layout.addWidget(self.users_table)
 
@@ -1412,9 +1664,14 @@ class RobloxManagerGUI(QMainWindow):
         header = self.processes_table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
         header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Stretch)
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)  
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)  
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)  
+
+        self.processes_table.setColumnWidth(2, 100)  
+        self.processes_table.setColumnWidth(4, 110)  
+
+        self.processes_table.verticalHeader().setDefaultSectionSize(60)
 
         layout.addWidget(self.processes_table)
 
@@ -1479,10 +1736,6 @@ class RobloxManagerGUI(QMainWindow):
 
         basic_group = QGroupBox("Basic Settings")
         basic_layout = QFormLayout(basic_group)
-
-        self.settings_place_id_input = QLineEdit()
-        self.settings_place_id_input.setPlaceholderText("Enter Roblox Place ID")
-        basic_layout.addRow("Place ID:", self.settings_place_id_input)
 
         self.settings_window_limit_input = QSpinBox()
         self.settings_window_limit_input.setRange(1, 999)
@@ -1835,16 +2088,50 @@ class RobloxManagerGUI(QMainWindow):
 
             actions_widget = QWidget()
             actions_layout = QHBoxLayout(actions_widget)
-            actions_layout.setContentsMargins(4, 4, 4, 4)
+            actions_layout.setContentsMargins(8, 5, 8, 5)
+            actions_layout.setSpacing(12)  
 
             restart_btn = QPushButton("Restart")
-            restart_btn.setMaximumWidth(80)
+            restart_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: {ModernStyle.PRIMARY};
+                    color: {ModernStyle.TEXT_PRIMARY};
+                    border: none;
+                    padding: 4px 8px;
+                    border-radius: 4px;
+                    font-weight: 500;
+                    font-size: 11px;
+                    min-width: 50px;
+                    max-width: 60px;
+                    min-height: 26px;
+                    max-height: 28px;
+                }}
+                QPushButton:hover {{
+                    background-color: {ModernStyle.PRIMARY_VARIANT};
+                }}
+            """)
             restart_btn.clicked.connect(lambda checked, uid=user_id: self.restart_user_session(uid))
             actions_layout.addWidget(restart_btn)
 
             kill_btn = QPushButton("Kill")
-            kill_btn.setProperty("class", "danger")
-            kill_btn.setMaximumWidth(60)
+            kill_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: {ModernStyle.ERROR};
+                    color: {ModernStyle.TEXT_PRIMARY};
+                    border: none;
+                    padding: 4px 8px;
+                    border-radius: 4px;
+                    font-weight: 500;
+                    font-size: 11px;
+                    min-width: 40px;
+                    max-width: 50px;
+                    min-height: 26px;
+                    max-height: 28px;
+                }}
+                QPushButton:hover {{
+                    background-color: 
+                }}
+            """)
             kill_btn.clicked.connect(lambda checked, uid=user_id: self.kill_user_processes(uid))
             actions_layout.addWidget(kill_btn)
 
@@ -1867,11 +2154,27 @@ class RobloxManagerGUI(QMainWindow):
 
             actions_widget = QWidget()
             actions_layout = QHBoxLayout(actions_widget)
-            actions_layout.setContentsMargins(4, 4, 4, 4)
+            actions_layout.setContentsMargins(8, 5, 8, 5)
 
             kill_btn = QPushButton("Kill")
-            kill_btn.setProperty("class", "danger")
-            kill_btn.setMaximumWidth(60)
+            kill_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: {ModernStyle.ERROR};
+                    color: {ModernStyle.TEXT_PRIMARY};
+                    border: none;
+                    padding: 4px 8px;
+                    border-radius: 4px;
+                    font-weight: 500;
+                    font-size: 11px;
+                    min-width: 50px;
+                    max-width: 60px;
+                    min-height: 26px;
+                    max-height: 28px;
+                }}
+                QPushButton:hover {{
+                    background-color: 
+                }}
+            """)
             kill_btn.clicked.connect(lambda checked, p=pid: self.kill_specific_process(p))
             actions_layout.addWidget(kill_btn)
 
@@ -1925,7 +2228,6 @@ class RobloxManagerGUI(QMainWindow):
         """Load current settings into the settings tab"""
         settings = self.config_manager.load_settings()
 
-        self.settings_place_id_input.setText(settings.get("place_id", "85896571713843"))
         self.settings_window_limit_input.setValue(settings.get("window_limit", 1))
 
         timeouts = settings.get("timeouts", {})
@@ -1935,16 +2237,8 @@ class RobloxManagerGUI(QMainWindow):
     def save_settings(self):
         """Save settings from the settings tab"""
         settings = {
-            "place_id": self.settings_place_id_input.text(),
             "window_limit": self.settings_window_limit_input.value(),
-            "excluded_pid": 0,
-            "check_intervals": {
-                "window": 3.0,
-                "presence": 1.5,
-                "cleanup": 30.0
-            },
             "timeouts": {
-                "relaunch": 20,
                 "offline": self.settings_offline_threshold_input.value(),
                 "launch_delay": self.settings_launch_delay_input.value()
             }
@@ -1962,7 +2256,6 @@ class RobloxManagerGUI(QMainWindow):
                                    "Are you sure you want to reset all settings to defaults?",
                                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         if reply == QMessageBox.StandardButton.Yes:
-            self.settings_place_id_input.setText("85896571713843")
             self.settings_window_limit_input.setValue(1)
             self.settings_offline_threshold_input.setValue(35)
             self.settings_launch_delay_input.setValue(4)
@@ -2105,9 +2398,13 @@ def main():
     """Main application entry point"""
     app = QApplication(sys.argv)
 
-    app.setApplicationName("Roblox Manager")
+    app.setApplicationName("JARAM")
     app.setApplicationVersion("1.0")
-    app.setOrganizationName("Roblox Manager")
+    app.setOrganizationName("cresqnt")
+
+    icon_path = _get_icon_path()
+    if icon_path and os.path.exists(icon_path):
+        app.setWindowIcon(QIcon(icon_path))
 
     window = RobloxManagerGUI()
     window.show()

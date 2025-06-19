@@ -71,19 +71,25 @@ class RobloxManager:
         self.auth_handler = AuthenticationHandler()
         self.presence_monitor = PresenceMonitor()
 
+        app_settings = self._load_app_settings()
+
         self.target_place = "15532962292"
-        self.window_limit = 1
+        self.window_limit = app_settings.get("window_limit", 1)
+
         self.check_intervals = {
             'window': 3,
             'presence': 1.5,
             'cleanup': 30
         }
+
+        timeouts = app_settings.get("timeouts", {})
         self.timeouts = {
-            'relaunch': 20,
-            'offline': 35,
-            'launch_delay': 4
+            'relaunch': 20,  
+            'offline': timeouts.get("offline", 35),
+            'launch_delay': timeouts.get("launch_delay", 4)
         }
-        self.excluded_pid = 0
+
+        self.excluded_pid = 0  
 
     def _load_settings(self):
         try:
@@ -100,6 +106,30 @@ class RobloxManager:
         except Exception as error:
             print(f"Configuration load failed: {error}")
             return {}
+
+    def _load_app_settings(self):
+        """Load application settings from settings.json"""
+        try:
+            if hasattr(self.config_manager, 'load_settings'):
+                return self.config_manager.load_settings()
+            else:
+
+                return {
+                    "window_limit": 1,
+                    "timeouts": {
+                        "offline": 35,
+                        "launch_delay": 4
+                    }
+                }
+        except Exception as error:
+            print(f"Failed to load application settings: {error}")
+            return {
+                "window_limit": 1,
+                "timeouts": {
+                    "offline": 35,
+                    "launch_delay": 4
+                }
+            }
 
 class ProcessTracker:
     def __init__(self):
