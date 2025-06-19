@@ -767,7 +767,6 @@ class UserManagementDialog(QDialog):
         self.cookie_extractor = CookieExtractor(self)
         self.setup_ui()
         self.load_users()
-        self.original_config = {}
 
     def setup_ui(self):
         layout = QVBoxLayout(self)
@@ -1486,7 +1485,7 @@ class RobloxManagerGUI(QMainWindow):
         basic_layout.addRow("Place ID:", self.settings_place_id_input)
 
         self.settings_window_limit_input = QSpinBox()
-        self.settings_window_limit_input.setRange(1, 5)
+        self.settings_window_limit_input.setRange(1, 999)
         self.settings_window_limit_input.setToolTip("Maximum windows per Roblox process")
         basic_layout.addRow("Window Limit:", self.settings_window_limit_input)
 
