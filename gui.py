@@ -18,32 +18,24 @@ from main import RobloxManager, ProcessManager, GameLauncher
 from cookie_extractor import CookieExtractor
 
 def _get_icon_path():
-    """Get the path to the icon file, handling both development and built executable"""
 
     icon_path = "JARAM.ico"
     if os.path.exists(icon_path):
-        print(f"Found icon at: {icon_path}")
         return icon_path
 
     if hasattr(sys, '_MEIPASS'):
         icon_path = os.path.join(sys._MEIPASS, "JARAM.ico")
-        print(f"Checking PyInstaller path: {icon_path}")
         if os.path.exists(icon_path):
-            print(f"Found icon at: {icon_path}")
             return icon_path
 
     script_dir = os.path.dirname(os.path.abspath(__file__))
     icon_path = os.path.join(script_dir, "JARAM.ico")
-    print(f"Checking script directory: {icon_path}")
     if os.path.exists(icon_path):
-        print(f"Found icon at: {icon_path}")
         return icon_path
 
-    print("Icon file not found in any location")
     return None
 
 class ConfigManager:
-    """Robust configuration manager that saves to AppData/JARAM folder"""
 
     def __init__(self):
         self.app_name = "JARAM"  
@@ -70,7 +62,6 @@ class ConfigManager:
         }
 
     def _get_config_directory(self):
-        """Get the configuration directory in AppData"""
         if os.name == 'nt':  
             appdata = os.environ.get('APPDATA')
             if appdata:
@@ -79,15 +70,13 @@ class ConfigManager:
         return Path.home() / f".{self.app_name.lower()}"
 
     def _ensure_directories(self):
-        """Ensure all necessary directories exist"""
         try:
             self.config_dir.mkdir(parents=True, exist_ok=True)
             self.backup_dir.mkdir(parents=True, exist_ok=True)
         except Exception as e:
-            print(f"Failed to create config directories: {e}")
+            pass
 
     def _create_backup(self, file_path):
-        """Create a backup of the configuration file"""
         if not file_path.exists():
             return
 
@@ -100,10 +89,9 @@ class ConfigManager:
 
             self._cleanup_old_backups(file_path.stem)
         except Exception as e:
-            print(f"Failed to create backup: {e}")
+            pass
 
     def _cleanup_old_backups(self, file_stem):
-        """Keep only the last 10 backups for a file"""
         try:
             pattern = f"{file_stem}_*.json"
             backups = sorted(self.backup_dir.glob(pattern), key=lambda x: x.stat().st_mtime, reverse=True)
@@ -111,10 +99,9 @@ class ConfigManager:
             for backup in backups[10:]:
                 backup.unlink()
         except Exception as e:
-            print(f"Failed to cleanup old backups: {e}")
+            pass
 
     def _safe_write_json(self, file_path, data):
-        """Safely write JSON data with atomic operation"""
         temp_path = file_path.with_suffix('.tmp')
 
         try:
@@ -137,7 +124,6 @@ class ConfigManager:
             raise e
 
     def load_users(self):
-        """Load user configuration"""
         try:
             if self.users_file.exists():
                 with open(self.users_file, 'r', encoding='utf-8') as f:
@@ -148,11 +134,9 @@ class ConfigManager:
 
                 return self._migrate_old_config()
         except Exception as e:
-            print(f"Failed to load users: {e}")
             return {}
 
     def save_users(self, users_data):
-        """Save user configuration with backup"""
         try:
 
             formatted_data = self._ensure_new_format(users_data)
@@ -162,11 +146,9 @@ class ConfigManager:
             self._safe_write_json(self.users_file, formatted_data)
             return True
         except Exception as e:
-            print(f"Failed to save users: {e}")
             return False
 
     def load_settings(self):
-        """Load application settings"""
         try:
             if self.settings_file.exists():
                 with open(self.settings_file, 'r', encoding='utf-8') as f:
@@ -178,11 +160,9 @@ class ConfigManager:
             else:
                 return self.default_settings.copy()
         except Exception as e:
-            print(f"Failed to load settings: {e}")
             return self.default_settings.copy()
 
     def save_settings(self, settings_data):
-        """Save application settings with backup"""
         try:
 
             self._create_backup(self.settings_file)
@@ -190,11 +170,9 @@ class ConfigManager:
             self._safe_write_json(self.settings_file, settings_data)
             return True
         except Exception as e:
-            print(f"Failed to save settings: {e}")
             return False
 
     def _migrate_old_config(self):
-        """Migrate from old config.json format"""
         old_config_path = Path("config.json")
         if old_config_path.exists():
             try:
@@ -204,15 +182,13 @@ class ConfigManager:
                 new_data = self._convert_to_new_format(old_data)
 
                 if self.save_users(new_data):
-                    print(f"Migrated configuration from config.json to {self.users_file}")
                     return new_data
             except Exception as e:
-                print(f"Failed to migrate old config: {e}")
+                pass
 
         return {}
 
     def _convert_to_new_format(self, old_data):
-        """Convert old format {user_id: cookie} to new format {user_id: {username, cookie, private_server_link, place}}"""
         new_data = {}
         for user_id, cookie in old_data.items():
             if isinstance(cookie, str):
@@ -229,7 +205,6 @@ class ConfigManager:
         return new_data
 
     def _ensure_new_format(self, users_data):
-        """Ensure users data is in new format with usernames and private server links"""
         if not users_data:
             return {}
 
@@ -262,7 +237,6 @@ class ConfigManager:
         return new_data
 
     def get_users_for_manager(self):
-        """Get users in the format expected by RobloxManager (user_id -> user_info)"""
         users = self.load_users()
         manager_format = {}
         for user_id, user_info in users.items():
@@ -280,7 +254,6 @@ class ConfigManager:
         return manager_format
 
     def get_config_info(self):
-        """Get information about configuration location"""
         return {
             "config_dir": str(self.config_dir),
             "users_file": str(self.users_file),
@@ -289,7 +262,6 @@ class ConfigManager:
         }
 
 class ModernStyle:
-    """Modern dark theme styling constants"""
     BACKGROUND = "#1e1e1e"
     SURFACE = "#2d2d2d"
     SURFACE_VARIANT = "#3d3d3d"
@@ -485,7 +457,6 @@ class ModernStyle:
         """
 
 class WorkerThread(QThread):
-    """Background thread for running the Roblox manager"""
     log_signal = pyqtSignal(str)
     status_signal = pyqtSignal(dict)
     process_signal = pyqtSignal(dict)
@@ -500,7 +471,6 @@ class WorkerThread(QThread):
         self.timing_trackers = {}
 
     def initialize_manager(self):
-        """Initialize the Roblox manager components"""
         try:
             self.manager = RobloxManager()
             self.process_mgr = ProcessManager(self.manager.excluded_pid)
@@ -529,17 +499,14 @@ class WorkerThread(QThread):
 
             return True
         except Exception as e:
-            self.log_signal.emit(f"Failed to initialize manager: {e}")
             return False
 
     def restart_user_session(self, user_id):
-        """Restart a specific user session"""
         if not self.manager or user_id not in self.user_states:
             return False
 
         try:
             state = self.user_states[user_id]
-            self.log_signal.emit(f"Manually restarting session for user {user_id}")
 
             for pid in self.manager.process_tracker.user_processes.get(user_id, []):
                 if self.process_mgr.verify_process_active(pid):
@@ -551,20 +518,15 @@ class WorkerThread(QThread):
                     self.user_states[user_id]["inactive_since"] = None
                     self.user_states[user_id]["requires_restart"] = False
                     self.user_states[user_id]["status"] = "Restarting"
-                    self.log_signal.emit(f"Successfully restarted session for user {user_id}")
                     return True
                 else:
-                    self.log_signal.emit(f"Failed to restart session for user {user_id}")
                     return False
             except Exception as e:
-                self.log_signal.emit(f"Error during session restart for user {user_id}: {e}")
                 return False
         except Exception as e:
-            self.log_signal.emit(f"Error restarting user {user_id}: {e}")
             return False
 
     def kill_user_processes(self, user_id):
-        """Kill all processes for a specific user"""
         if not self.manager or user_id not in self.user_states:
             return False
 
@@ -575,54 +537,40 @@ class WorkerThread(QThread):
                     if self.process_mgr.terminate_process(pid, self.manager.process_tracker):
                         killed_count += 1
 
-            self.log_signal.emit(f"Killed {killed_count} processes for user {user_id}")
             return True
         except Exception as e:
-            self.log_signal.emit(f"Error killing processes for user {user_id}: {e}")
             return False
 
     def kill_all_processes(self):
-        """Kill all Roblox processes"""
         if not self.process_mgr:
             return False
 
         try:
             killed = self.process_mgr.terminate_process(None, self.manager.process_tracker)
-            if killed:
-                self.log_signal.emit("All Roblox processes terminated")
-            else:
-                self.log_signal.emit("No Roblox processes found to terminate")
             return killed
         except Exception as e:
-            self.log_signal.emit(f"Error killing all processes: {e}")
             return False
 
     def cleanup_dead_processes(self):
-        """Cleanup dead processes"""
         if not self.process_mgr:
             return False
 
         try:
             self.process_mgr.cleanup_dead_processes(self.manager.process_tracker)
-            self.log_signal.emit("Dead processes cleaned up")
             return True
         except Exception as e:
-            self.log_signal.emit(f"Error cleaning up processes: {e}")
             return False
 
     def run(self):
-        """Main worker thread loop"""
         if not self.initialize_manager():
             return
 
         self.running = True
-        self.log_signal.emit("Roblox Manager started successfully")
 
         try:
             self.launcher.initialize_all_sessions(self.manager.settings)
-            self.log_signal.emit(f"Initialized {len(self.manager.settings)} user sessions")
         except Exception as e:
-            self.log_signal.emit(f"Failed to initialize sessions: {e}")
+            pass
 
         while self.running:
             current_timestamp = time.time()
@@ -634,15 +582,10 @@ class WorkerThread(QThread):
                     self.timing_trackers['cleanup'] = current_timestamp
 
                 if current_timestamp - self.timing_trackers['orphan_check'] >= (self.manager.check_intervals['cleanup'] * 2):
-                    self.log_signal.emit("[ORPHAN CHECK] Starting orphan process cleanup...")
-                    eliminated = self.process_mgr.eliminate_orphaned_processes(
+                    self.process_mgr.eliminate_orphaned_processes(
                         self.manager.process_tracker,
                         set(self.manager.settings.keys())
                     )
-                    if eliminated:
-                        self.log_signal.emit("[ORPHAN CHECK] Eliminated orphaned processes")
-                    else:
-                        self.log_signal.emit("[ORPHAN CHECK] No orphaned processes found")
                     self.timing_trackers['orphan_check'] = current_timestamp
 
                 if current_timestamp - self.timing_trackers['window_check'] >= self.manager.check_intervals['window']:
@@ -663,8 +606,6 @@ class WorkerThread(QThread):
 
                     for pid, count in window_counts.items():
                         if count > self.manager.window_limit and pid != self.manager.excluded_pid:
-                            user_id = self.manager.process_tracker.process_owners.get(pid, "Unknown")
-                            self.log_signal.emit(f"PID {pid} (User: {user_id}) exceeded window limit ({count})! Terminating...")
                             self.process_mgr.terminate_process(pid, self.manager.process_tracker)
 
                     self.timing_trackers['window_check'] = current_timestamp
@@ -715,7 +656,6 @@ class WorkerThread(QThread):
                         if inactive_duration >= self.manager.timeouts['offline']:
                             if not self.user_states[user_id]["requires_restart"]:
                                 self.user_states[user_id]["requires_restart"] = True
-                                self.log_signal.emit(f"User {user_id} marked for restart after {int(inactive_duration)}s offline")
 
                         status = f"Inactive ({int(inactive_duration)}s)"
                         self.user_states[user_id]["status"] = status
@@ -739,15 +679,12 @@ class WorkerThread(QThread):
                     target_user = restart_candidates[0]
                     target_state = self.user_states[target_user]
 
-                    self.log_signal.emit(f"Auto-restarting session for user {target_user}...")
-
                     running_pids = []
                     for pid in self.manager.process_tracker.user_processes.get(target_user, []):
                         if self.process_mgr.verify_process_active(pid):
                             running_pids.append(pid)
 
                     if running_pids:
-                        self.log_signal.emit(f"Terminating {len(running_pids)} existing processes for user {target_user}")
                         for pid in running_pids:
                             self.process_mgr.terminate_process(pid, self.manager.process_tracker)
 
@@ -758,24 +695,18 @@ class WorkerThread(QThread):
                             self.user_states[target_user]["requires_restart"] = False
                             self.user_states[target_user]["status"] = "Restarting"
                             self.timing_trackers['relaunch'] = current_timestamp
-                            self.log_signal.emit(f"Successfully restarted session for user {target_user}")
-                        else:
-                            self.log_signal.emit(f"Failed to restart session for user {target_user}")
                     except Exception as e:
-                        self.log_signal.emit(f"Error during auto-restart for user {target_user}: {e}")
+                        pass
 
             except Exception as error:
-                self.log_signal.emit(f"[WORKER ERROR] {error}")
+                pass
 
             time.sleep(self.manager.check_intervals['presence'])
 
     def stop(self):
-        """Stop the worker thread"""
         self.running = False
-        self.log_signal.emit("Roblox Manager stopped")
 
 class UserManagementDialog(QDialog):
-    """Completely redesigned dialog for managing user accounts with improved layout and functionality"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -791,7 +722,6 @@ class UserManagementDialog(QDialog):
         self.load_users()
 
     def setup_ui(self):
-        """Setup the completely redesigned user interface"""
         main_layout = QVBoxLayout(self)
         main_layout.setSpacing(15)
         main_layout.setContentsMargins(20, 20, 20, 20)
@@ -817,7 +747,6 @@ class UserManagementDialog(QDialog):
         main_layout.addWidget(button_box)
 
     def _create_user_list_panel(self):
-        """Create the left panel with user list using QGridLayout for better control"""
         panel = QWidget()
         panel_layout = QVBoxLayout(panel)
         panel_layout.setContentsMargins(0, 0, 10, 0)
@@ -857,7 +786,6 @@ class UserManagementDialog(QDialog):
         return panel
 
     def _create_user_form_panel(self):
-        """Create the right panel with user form"""
         panel = QWidget()
         panel_layout = QVBoxLayout(panel)
         panel_layout.setContentsMargins(10, 0, 0, 0)
@@ -949,7 +877,6 @@ class UserManagementDialog(QDialog):
         return panel
 
     def _create_controls_layout(self):
-        """Create bottom controls layout"""
         controls_layout = QHBoxLayout()
 
         refresh_btn = QPushButton("Refresh List")
@@ -962,7 +889,6 @@ class UserManagementDialog(QDialog):
         return controls_layout
 
     def _get_input_style(self):
-        """Get consistent input field styling"""
         return f"""
             QLineEdit {{
                 background-color: {ModernStyle.SURFACE};
@@ -979,7 +905,6 @@ class UserManagementDialog(QDialog):
         """
 
     def _get_primary_button_style(self):
-        """Get primary button styling"""
         return f"""
             QPushButton {{
                 background-color: {ModernStyle.PRIMARY};
@@ -1001,7 +926,6 @@ class UserManagementDialog(QDialog):
         """
 
     def _get_secondary_button_style(self):
-        """Get secondary button styling"""
         return f"""
             QPushButton {{
                 background-color: {ModernStyle.SURFACE_VARIANT};
@@ -1020,7 +944,6 @@ class UserManagementDialog(QDialog):
         """
 
     def _get_action_button_style(self, color_type="primary"):
-        """Get action button styling for user cards with improved visibility"""
         if color_type == "danger":
             bg_color = ModernStyle.ERROR
             hover_color = "#dc2626"
@@ -1053,7 +976,6 @@ class UserManagementDialog(QDialog):
         """
 
     def load_users(self):
-        """Load users from config file"""
         try:
             self.original_config = self.config_manager.load_users()
             self.refresh_user_list()
@@ -1063,7 +985,6 @@ class UserManagementDialog(QDialog):
             self.refresh_user_list()
 
     def refresh_user_list(self):
-        """Refresh the user list display with modern card-based layout"""
 
         for i in reversed(range(self.user_list_layout.count())):
             child = self.user_list_layout.itemAt(i).widget()
@@ -1077,7 +998,6 @@ class UserManagementDialog(QDialog):
         self.user_list_layout.addStretch()
 
     def _create_user_card(self, user_id, user_info):
-        """Create a modern user card widget with proper text display"""
         card = QWidget()
         card.setStyleSheet(f"""
             QWidget {{
@@ -1202,7 +1122,6 @@ class UserManagementDialog(QDialog):
         return card
 
     def edit_user_card(self, user_id):
-        """Edit user using the form panel"""
         if user_id not in self.original_config:
             QMessageBox.warning(self, "Error", f"User {user_id} not found!")
             return
@@ -1231,7 +1150,6 @@ class UserManagementDialog(QDialog):
         self.cancel_edit_btn.show()
 
     def cancel_edit(self):
-        """Cancel edit mode and return to add mode"""
         self.selected_user_id = None
         self.form_header.setText("Add New User")
 
@@ -1247,7 +1165,6 @@ class UserManagementDialog(QDialog):
         self.cancel_edit_btn.hide()
 
     def update_user(self):
-        """Update existing user"""
         if not self.selected_user_id:
             return
 
@@ -1282,7 +1199,6 @@ class UserManagementDialog(QDialog):
         QMessageBox.information(self, "Success", f"User {user_id} ({username}) updated successfully!")
 
     def add_user(self):
-        """Add a new user with improved validation and form handling"""
         user_id = self.user_id_input.text().strip()
         username = self.username_input.text().strip()
         private_server_link = self.private_server_input.text().strip()
@@ -1364,7 +1280,6 @@ class UserManagementDialog(QDialog):
             QMessageBox.critical(self, "Error", f"Failed to add user: {e}")
 
     def extract_cookie_from_browser(self):
-        """Extract cookie using browser automation"""
         try:
             self.browser_login_btn.setEnabled(False)
             self.browser_login_btn.setText("Extracting...")
@@ -1379,7 +1294,6 @@ class UserManagementDialog(QDialog):
             self._reset_browser_button()
 
     def _on_cookie_extraction_complete(self, cookie: str):
-        """Handle completion of cookie extraction"""
         try:
             if cookie:
                 self.cookie_input.setText(cookie)
@@ -1396,12 +1310,10 @@ class UserManagementDialog(QDialog):
             self._reset_browser_button()
 
     def _reset_browser_button(self):
-        """Reset the browser login button to its original state"""
         self.browser_login_btn.setEnabled(True)
         self.browser_login_btn.setText("Login with Browser")
 
     def delete_user_by_id(self, user_id):
-        """Delete a user by user ID with improved confirmation"""
         user_info = self.original_config.get(user_id, {})
         if isinstance(user_info, dict):
             username = user_info.get("username", f"User_{user_id}")
@@ -1426,7 +1338,6 @@ class UserManagementDialog(QDialog):
                 QMessageBox.warning(self, "Error", f"User {user_id} not found in configuration!")
 
     def save_and_close(self):
-        """Save users to config file and close"""
         if self.config_manager.save_users(self.original_config):
             config_info = self.config_manager.get_config_info()
             QMessageBox.information(self, "Success",
@@ -1439,7 +1350,6 @@ class UserManagementDialog(QDialog):
                                "Failed to save user configuration. Please check the logs for details.")
 
 class RobloxManagerGUI(QMainWindow):
-    """Main GUI window for Roblox Manager"""
 
     def __init__(self):
         super().__init__()
@@ -1450,7 +1360,6 @@ class RobloxManagerGUI(QMainWindow):
         self.setup_timers()
 
     def setup_ui(self):
-        """Setup the main user interface"""
         self.setWindowTitle("JARAM - Just Another Roblox Account Manager")
         self.setGeometry(100, 100, 1200, 800)
 
@@ -1516,7 +1425,6 @@ class RobloxManagerGUI(QMainWindow):
         self.user_data = {}
 
     def setup_menu_bar(self):
-        """Setup the menu bar"""
         menubar = self.menuBar()
 
         file_menu = menubar.addMenu("File")
@@ -1540,7 +1448,6 @@ class RobloxManagerGUI(QMainWindow):
         about_action.triggered.connect(self.show_about)
 
     def setup_dashboard_tab(self):
-        """Setup the main dashboard tab"""
         dashboard_widget = QWidget()
         layout = QVBoxLayout(dashboard_widget)
 
@@ -1604,7 +1511,6 @@ class RobloxManagerGUI(QMainWindow):
         self.tab_widget.addTab(dashboard_widget, "Dashboard")
 
     def setup_users_tab(self):
-        """Setup the users monitoring tab"""
         users_widget = QWidget()
         layout = QVBoxLayout(users_widget)
 
@@ -1651,7 +1557,6 @@ class RobloxManagerGUI(QMainWindow):
         self.tab_widget.addTab(users_widget, "Users")
 
     def setup_processes_tab(self):
-        """Setup the processes monitoring tab"""
         processes_widget = QWidget()
         layout = QVBoxLayout(processes_widget)
 
@@ -1693,7 +1598,6 @@ class RobloxManagerGUI(QMainWindow):
         self.tab_widget.addTab(processes_widget, "Processes")
 
     def setup_logs_tab(self):
-        """Setup the logs tab"""
         logs_widget = QWidget()
         layout = QVBoxLayout(logs_widget)
 
@@ -1723,7 +1627,6 @@ class RobloxManagerGUI(QMainWindow):
         self.tab_widget.addTab(logs_widget, "Logs")
 
     def setup_settings_tab(self):
-        """Setup the settings tab"""
         settings_widget = QWidget()
         layout = QVBoxLayout(settings_widget)
 
@@ -1942,7 +1845,6 @@ class RobloxManagerGUI(QMainWindow):
             QMessageBox.warning(self, "Error", f"Failed to open URL: {e}")
 
     def setup_timers(self):
-        """Setup update timers"""
 
         self.ui_timer = QTimer()
         self.ui_timer.timeout.connect(self.update_ui)
@@ -1953,7 +1855,6 @@ class RobloxManagerGUI(QMainWindow):
         self.uptime_timer.start(1000)
 
     def start_manager(self):
-        """Start the Roblox manager"""
         if self.worker_thread and self.worker_thread.isRunning():
             return
 
@@ -1979,10 +1880,7 @@ class RobloxManagerGUI(QMainWindow):
         self.status_label.setStyleSheet(f"color: {ModernStyle.SECONDARY}; font-weight: bold;")
         self.start_time = time.time()
 
-        self.add_log("Roblox Manager started")
-
     def stop_manager(self):
-        """Stop the Roblox manager"""
         if self.worker_thread and self.worker_thread.isRunning():
             self.worker_thread.stop()
             self.worker_thread.wait()
@@ -1993,10 +1891,7 @@ class RobloxManagerGUI(QMainWindow):
         self.status_label.setStyleSheet(f"color: {ModernStyle.ERROR}; font-weight: bold;")
         self.start_time = None
 
-        self.add_log("Roblox Manager stopped")
-
     def update_uptime(self):
-        """Update the uptime display"""
         if self.start_time:
             uptime = time.time() - self.start_time
             hours = int(uptime // 3600)
@@ -2007,7 +1902,6 @@ class RobloxManagerGUI(QMainWindow):
             self.uptime_label.setText("Uptime: 00:00:00")
 
     def update_ui(self):
-        """Update UI elements"""
 
         total_users = len(self.user_data)
         active_users = sum(1 for data in self.user_data.values() if data.get('status') == 'Active')
@@ -2020,17 +1914,14 @@ class RobloxManagerGUI(QMainWindow):
         self.pending_restarts_label.setText(str(pending_restarts))
 
     def update_user_status(self, status_data):
-        """Update user status from worker thread"""
         self.user_data = status_data
         self.refresh_users()
 
     def update_process_data(self, process_data):
-        """Update process data from worker thread"""
         self.process_data = process_data
         self.refresh_processes()
 
     def refresh_users(self):
-        """Refresh the users table"""
         self.users_table.setRowCount(len(self.user_data))
 
         users_config = self.config_manager.load_users()
@@ -2138,7 +2029,6 @@ class RobloxManagerGUI(QMainWindow):
             self.users_table.setCellWidget(row, 8, actions_widget)
 
     def refresh_processes(self):
-        """Refresh the processes table"""
         self.processes_table.setRowCount(len(self.process_data))
 
         for row, (pid, data) in enumerate(self.process_data.items()):
@@ -2181,7 +2071,6 @@ class RobloxManagerGUI(QMainWindow):
             self.processes_table.setCellWidget(row, 4, actions_widget)
 
     def add_log(self, message):
-        """Add a log message"""
         timestamp = datetime.now().strftime("%H:%M:%S")
         formatted_message = f"[{timestamp}] {message}"
 
@@ -2198,11 +2087,9 @@ class RobloxManagerGUI(QMainWindow):
             self.activity_list.setPlainText('\n'.join(lines[-10:]))
 
     def clear_logs(self):
-        """Clear the log display"""
         self.log_display.clear()
 
     def save_logs(self):
-        """Save logs to file"""
         try:
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
             filename = f"roblox_manager_logs_{timestamp}.txt"
@@ -2215,17 +2102,13 @@ class RobloxManagerGUI(QMainWindow):
             QMessageBox.critical(self, "Error", f"Failed to save logs: {e}")
 
     def open_user_management(self):
-        """Open user management dialog"""
         dialog = UserManagementDialog(self)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
-            self.add_log("User configuration updated")
+        dialog.exec()
 
     def open_settings(self):
-        """Switch to settings tab"""
         self.tab_widget.setCurrentIndex(4)
 
     def load_settings_tab(self):
-        """Load current settings into the settings tab"""
         settings = self.config_manager.load_settings()
 
         self.settings_window_limit_input.setValue(settings.get("window_limit", 1))
@@ -2235,7 +2118,6 @@ class RobloxManagerGUI(QMainWindow):
         self.settings_launch_delay_input.setValue(timeouts.get("launch_delay", 4))
 
     def save_settings(self):
-        """Save settings from the settings tab"""
         settings = {
             "window_limit": self.settings_window_limit_input.value(),
             "timeouts": {
@@ -2246,12 +2128,11 @@ class RobloxManagerGUI(QMainWindow):
 
         if self.config_manager.save_settings(settings):
             QMessageBox.information(self, "Success", "Settings saved successfully!")
-            self.add_log("Settings updated")
+
         else:
             QMessageBox.critical(self, "Error", "Failed to save settings. Please check the logs for details.")
 
     def reset_settings(self):
-        """Reset settings to defaults"""
         reply = QMessageBox.question(self, "Reset Settings",
                                    "Are you sure you want to reset all settings to defaults?",
                                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
@@ -2262,7 +2143,6 @@ class RobloxManagerGUI(QMainWindow):
             QMessageBox.information(self, "Reset Complete", "Settings have been reset to defaults. Click 'Save Settings' to apply.")
 
     def show_config_location(self):
-        """Show configuration location dialog"""
         config_info = self.config_manager.get_config_info()
 
         msg = QMessageBox(self)
@@ -2289,7 +2169,6 @@ class RobloxManagerGUI(QMainWindow):
                 QMessageBox.warning(self, "Error", f"Failed to open folder: {e}")
 
     def show_about(self):
-        """Show about dialog"""
         config_info = self.config_manager.get_config_info()
         QMessageBox.about(self, "About JARAM",
                          "JARAM (Just Another Roblox Account Manager) v1.0\n\n"
@@ -2299,7 +2178,6 @@ class RobloxManagerGUI(QMainWindow):
                          f"Configuration stored in:\n{config_info['config_dir']}")
 
     def restart_all_sessions(self):
-        """Restart all user sessions"""
         if not self.worker_thread or not self.worker_thread.isRunning():
             QMessageBox.warning(self, "Manager Not Running", "Please start the manager first.")
             return
@@ -2308,12 +2186,10 @@ class RobloxManagerGUI(QMainWindow):
                                    "Are you sure you want to restart all sessions?",
                                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         if reply == QMessageBox.StandardButton.Yes:
-            self.add_log("Restarting all sessions...")
             for user_id in self.user_data.keys():
                 self.worker_thread.restart_user_session(user_id)
 
     def kill_all_processes(self):
-        """Kill all Roblox processes"""
         if not self.worker_thread or not self.worker_thread.isRunning():
             QMessageBox.warning(self, "Manager Not Running", "Please start the manager first.")
             return
@@ -2325,7 +2201,6 @@ class RobloxManagerGUI(QMainWindow):
             self.worker_thread.kill_all_processes()
 
     def cleanup_processes(self):
-        """Cleanup dead processes"""
         if not self.worker_thread or not self.worker_thread.isRunning():
             QMessageBox.warning(self, "Manager Not Running", "Please start the manager first.")
             return
@@ -2333,7 +2208,6 @@ class RobloxManagerGUI(QMainWindow):
         self.worker_thread.cleanup_dead_processes()
 
     def restart_user_session(self, user_id):
-        """Restart a specific user session"""
         if not self.worker_thread or not self.worker_thread.isRunning():
             QMessageBox.warning(self, "Manager Not Running", "Please start the manager first.")
             return
@@ -2341,7 +2215,6 @@ class RobloxManagerGUI(QMainWindow):
         self.worker_thread.restart_user_session(user_id)
 
     def kill_user_processes(self, user_id):
-        """Kill processes for a specific user"""
         if not self.worker_thread or not self.worker_thread.isRunning():
             QMessageBox.warning(self, "Manager Not Running", "Please start the manager first.")
             return
@@ -2353,7 +2226,6 @@ class RobloxManagerGUI(QMainWindow):
             self.worker_thread.kill_user_processes(user_id)
 
     def kill_specific_process(self, pid):
-        """Kill a specific process by PID"""
         if not self.worker_thread or not self.worker_thread.isRunning():
             QMessageBox.warning(self, "Manager Not Running", "Please start the manager first.")
             return
@@ -2363,16 +2235,11 @@ class RobloxManagerGUI(QMainWindow):
                                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         if reply == QMessageBox.StandardButton.Yes:
             if self.worker_thread.process_mgr:
-                success = self.worker_thread.process_mgr.terminate_process(
+                self.worker_thread.process_mgr.terminate_process(
                     int(pid), self.worker_thread.manager.process_tracker
                 )
-                if success:
-                    self.add_log(f"Successfully killed process {pid}")
-                else:
-                    self.add_log(f"Failed to kill process {pid}")
 
     def kill_selected_process(self):
-        """Kill the selected process"""
         current_row = self.processes_table.currentRow()
         if current_row >= 0:
             pid_item = self.processes_table.item(current_row, 0)
@@ -2381,7 +2248,6 @@ class RobloxManagerGUI(QMainWindow):
                 self.kill_specific_process(pid)
 
     def closeEvent(self, event):
-        """Handle application close event"""
         if self.worker_thread and self.worker_thread.isRunning():
             reply = QMessageBox.question(self, "Confirm Exit",
                                        "The manager is still running. Do you want to stop it and exit?",
@@ -2395,7 +2261,6 @@ class RobloxManagerGUI(QMainWindow):
             event.accept()
 
 def main():
-    """Main application entry point"""
     app = QApplication(sys.argv)
 
     app.setApplicationName("JARAM")

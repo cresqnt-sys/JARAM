@@ -1,8 +1,3 @@
-"""
-Cookie extraction module for automated Roblox login using undetected Chrome.
-Provides browser-based authentication to extract .ROBLOSECURITY cookies.
-"""
-
 import time
 import threading
 from typing import Optional, Callable
@@ -15,22 +10,20 @@ from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import TimeoutException, WebDriverException
 
 class CookieExtractionThread(QThread):
-    """Thread for handling cookie extraction without blocking the UI"""
 
-    cookie_extracted = pyqtSignal(str)  
-    extraction_failed = pyqtSignal(str)  
-    status_update = pyqtSignal(str)  
-    browser_ready = pyqtSignal()  
+    cookie_extracted = pyqtSignal(str)
+    extraction_failed = pyqtSignal(str)
+    status_update = pyqtSignal(str)
+    browser_ready = pyqtSignal()
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.driver = None
         self.should_stop = False
-        self.extraction_timeout = 300  
-        self.extraction_completed = False  
+        self.extraction_timeout = 300
+        self.extraction_completed = False
 
     def run(self):
-        """Main thread execution for cookie extraction"""
         try:
             self.status_update.emit("Initializing browser...")
             self._setup_browser()
@@ -55,7 +48,6 @@ class CookieExtractionThread(QThread):
             self._cleanup_browser()
 
     def _setup_browser(self):
-        """Setup undetected Chrome browser"""
         try:
 
             options = uc.ChromeOptions()
@@ -78,7 +70,6 @@ class CookieExtractionThread(QThread):
             raise Exception(f"Failed to initialize browser: {str(e)}")
 
     def _navigate_to_login(self):
-        """Navigate to Roblox login page"""
         try:
             self.driver.get("https://www.roblox.com/login")
 
@@ -95,9 +86,8 @@ class CookieExtractionThread(QThread):
             raise Exception(f"Navigation error: {str(e)}")
 
     def _wait_for_login_completion(self):
-        """Wait for user to complete login and extract cookie"""
         start_time = time.time()
-        check_interval = 2  
+        check_interval = 2
         last_url = ""
         consecutive_same_url_count = 0
 
@@ -147,7 +137,7 @@ class CookieExtractionThread(QThread):
                             self.extraction_completed = True
                             self.cookie_extracted.emit(cookie)
                             return
-                    elif consecutive_same_url_count >= 2:  
+                    elif consecutive_same_url_count >= 2:
                         self.status_update.emit("Waiting for page to fully load...")
 
                         time.sleep(3)
@@ -178,15 +168,14 @@ class CookieExtractionThread(QThread):
             self.extraction_failed.emit("Login timeout - please try again")
 
     def _verify_login_status(self) -> bool:
-        """Verify that the user is actually logged in by checking page elements"""
         try:
 
             login_indicators = [
-                "//a[contains(@href, '/users/')]",  
-                "//span[contains(@class, 'avatar')]",  
-                "//*[contains(@class, 'navbar-right')]//a[contains(@href, '/my/')]",  
-                "//*[contains(text(), 'Robux')]",  
-                "//a[contains(@href, '/my/account')]"  
+                "//a[contains(@href, '/users/')]",
+                "//span[contains(@class, 'avatar')]",
+                "//*[contains(@class, 'navbar-right')]//a[contains(@href, '/my/')]",
+                "//*[contains(text(), 'Robux')]",
+                "//a[contains(@href, '/my/account')]"
             ]
 
             for indicator in login_indicators:
@@ -202,7 +191,6 @@ class CookieExtractionThread(QThread):
             return False
 
     def _extract_roblosecurity_cookie(self) -> Optional[str]:
-        """Extract the .ROBLOSECURITY cookie from the browser"""
         try:
 
             time.sleep(1)
@@ -233,51 +221,40 @@ class CookieExtractionThread(QThread):
             return None
 
         except Exception as e:
-            print(f"Error extracting cookie: {e}")
             return None
 
     def _cleanup_browser(self):
-        """Clean up browser resources"""
         if self.driver:
             try:
                 self.driver.quit()
             except:
-                pass  
+                pass
             finally:
                 self.driver = None
 
     def stop_extraction(self):
-        """Stop the extraction process"""
         self.should_stop = True
         if not self.extraction_completed:
             self.extraction_completed = True
         self._cleanup_browser()
 
 class CookieExtractor(QObject):
-    """Main cookie extractor class that manages the extraction process"""
 
     def __init__(self, parent=None):
         super().__init__(parent)
         self.extraction_thread = None
         self.progress_dialog = None
         self.callback = None
-        self.callback_called = False  
+        self.callback_called = False
 
     def extract_cookie_async(self, callback: Callable[[str], None], parent_widget=None):
-        """
-        Start asynchronous cookie extraction process
-
-        Args:
-            callback: Function to call with extracted cookie (or None if failed)
-            parent_widget: Parent widget for progress dialog
-        """
         if self.extraction_thread and self.extraction_thread.isRunning():
-            QMessageBox.warning(parent_widget, "Extraction in Progress", 
+            QMessageBox.warning(parent_widget, "Extraction in Progress",
                               "Cookie extraction is already in progress. Please wait.")
             return
 
         self.callback = callback
-        self.callback_called = False  
+        self.callback_called = False
 
         self.extraction_thread = CookieExtractionThread()
         self.extraction_thread.cookie_extracted.connect(self._on_cookie_extracted)
@@ -291,20 +268,18 @@ class CookieExtractor(QObject):
         self.extraction_thread.start()
 
     def _create_progress_dialog(self, parent_widget):
-        """Create and configure the progress dialog"""
         self.progress_dialog = QProgressDialog(parent_widget)
         self.progress_dialog.setWindowTitle("Cookie Extraction")
         self.progress_dialog.setLabelText("Initializing browser...")
-        self.progress_dialog.setRange(0, 0)  
+        self.progress_dialog.setRange(0, 0)
         self.progress_dialog.setCancelButtonText("Cancel")
         self.progress_dialog.setModal(True)
         self.progress_dialog.canceled.connect(self._cancel_extraction)
         self.progress_dialog.show()
 
     def _on_cookie_extracted(self, cookie: str):
-        """Handle successful cookie extraction"""
         if self.callback_called:
-            return  
+            return
 
         self.callback_called = True
 
@@ -315,9 +290,8 @@ class CookieExtractor(QObject):
             self.callback(cookie)
 
     def _on_extraction_failed(self, error_message: str):
-        """Handle extraction failure"""
         if self.callback_called:
-            return  
+            return
 
         self.callback_called = True
 
@@ -331,12 +305,10 @@ class CookieExtractor(QObject):
             self.callback(None)
 
     def _on_status_update(self, status: str):
-        """Handle status updates"""
         if self.progress_dialog:
             self.progress_dialog.setLabelText(status)
 
     def _on_browser_ready(self):
-        """Handle browser ready signal"""
         if self.progress_dialog:
             self.progress_dialog.setLabelText(
                 "Browser is ready!\n\n"
@@ -349,22 +321,20 @@ class CookieExtractor(QObject):
             )
 
     def _on_thread_finished(self):
-        """Handle thread completion"""
         if self.progress_dialog:
             self.progress_dialog.close()
 
         self.extraction_thread = None
 
     def _cancel_extraction(self):
-        """Cancel the extraction process"""
         if self.callback_called:
-            return  
+            return
 
         self.callback_called = True
 
         if self.extraction_thread:
             self.extraction_thread.stop_extraction()
-            self.extraction_thread.wait(5000)  
+            self.extraction_thread.wait(5000)
 
         if self.callback:
             self.callback(None)
