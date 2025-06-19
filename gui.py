@@ -8,7 +8,7 @@ from pathlib import Path
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                             QHBoxLayout, QGridLayout, QTabWidget, QTableWidget,
                             QTableWidgetItem, QPushButton, QLabel, QLineEdit,
-                            QSpinBox, QDoubleSpinBox, QTextEdit, QGroupBox,
+                            QSpinBox, QTextEdit, QGroupBox,
                             QProgressBar, QComboBox, QCheckBox, QSplitter,
                             QHeaderView, QMessageBox, QDialog, QDialogButtonBox,
                             QFormLayout, QScrollArea, QFrame)
@@ -1100,134 +1100,7 @@ class UserManagementDialog(QDialog):
             QMessageBox.critical(self, "Error",
                                "Failed to save user configuration. Please check the logs for details.")
 
-class SettingsDialog(QDialog):
-    """Dialog for application settings"""
 
-    def __init__(self, parent=None):
-        super().__init__(parent)
-        self.setWindowTitle("Settings")
-        self.setModal(True)
-        self.resize(500, 400)
-        self.config_manager = ConfigManager()
-        self.setup_ui()
-        self.load_settings()
-
-    def setup_ui(self):
-        layout = QVBoxLayout(self)
-
-        game_group = QGroupBox("Game Settings")
-        game_layout = QFormLayout(game_group)
-
-        place_id_label = QLabel("Place ID:")
-        place_id_label.setToolTip("The Roblox place ID to launch (e.g., 85896571713843)")
-        self.place_id_input = QLineEdit()
-        self.place_id_input.setPlaceholderText("Enter Roblox Place ID (e.g., 85896571713843)")
-        self.place_id_input.setToolTip("The ID of the Roblox place/game to launch for all users")
-        game_layout.addRow(place_id_label, self.place_id_input)
-
-        self.window_limit_input = QSpinBox()
-        self.window_limit_input.setRange(1, 10)
-        self.window_limit_input.setToolTip("Maximum number of windows allowed per Roblox process")
-        game_layout.addRow("Window Limit:", self.window_limit_input)
-
-        self.excluded_pid_input = QSpinBox()
-        self.excluded_pid_input.setRange(0, 999999)
-        self.excluded_pid_input.setToolTip("Process ID to exclude from management (0 = none)")
-        game_layout.addRow("Excluded PID:", self.excluded_pid_input)
-
-        layout.addWidget(game_group)
-
-        timing_group = QGroupBox("Timing Settings")
-        timing_layout = QFormLayout(timing_group)
-
-        self.window_check_input = QDoubleSpinBox()
-        self.window_check_input.setRange(0.1, 60.0)
-        self.window_check_input.setSuffix(" seconds")
-        timing_layout.addRow("Window Check Interval:", self.window_check_input)
-
-        self.presence_check_input = QDoubleSpinBox()
-        self.presence_check_input.setRange(0.1, 10.0)
-        self.presence_check_input.setSuffix(" seconds")
-        timing_layout.addRow("Presence Check Interval:", self.presence_check_input)
-
-        self.cleanup_interval_input = QDoubleSpinBox()
-        self.cleanup_interval_input.setRange(1.0, 300.0)
-        self.cleanup_interval_input.setSuffix(" seconds")
-        timing_layout.addRow("Cleanup Interval:", self.cleanup_interval_input)
-
-        layout.addWidget(timing_group)
-
-        timeout_group = QGroupBox("Timeout Settings")
-        timeout_layout = QFormLayout(timeout_group)
-
-        self.relaunch_timeout_input = QSpinBox()
-        self.relaunch_timeout_input.setRange(5, 120)
-        self.relaunch_timeout_input.setSuffix(" seconds")
-        timeout_layout.addRow("Relaunch Timeout:", self.relaunch_timeout_input)
-
-        self.offline_threshold_input = QSpinBox()
-        self.offline_threshold_input.setRange(10, 300)
-        self.offline_threshold_input.setSuffix(" seconds")
-        timeout_layout.addRow("Offline Threshold:", self.offline_threshold_input)
-
-        self.launch_delay_input = QSpinBox()
-        self.launch_delay_input.setRange(1, 30)
-        self.launch_delay_input.setSuffix(" seconds")
-        timeout_layout.addRow("Launch Delay:", self.launch_delay_input)
-
-        layout.addWidget(timeout_group)
-
-        button_box = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
-        button_box.accepted.connect(self.save_and_close)
-        button_box.rejected.connect(self.reject)
-        layout.addWidget(button_box)
-
-    def load_settings(self):
-        """Load current settings"""
-        settings = self.config_manager.load_settings()
-
-        self.place_id_input.setText(settings.get("place_id", "85896571713843"))
-        self.window_limit_input.setValue(settings.get("window_limit", 1))
-        self.excluded_pid_input.setValue(settings.get("excluded_pid", 0))
-
-        check_intervals = settings.get("check_intervals", {})
-        self.window_check_input.setValue(check_intervals.get("window", 3.0))
-        self.presence_check_input.setValue(check_intervals.get("presence", 1.5))
-        self.cleanup_interval_input.setValue(check_intervals.get("cleanup", 30.0))
-
-        timeouts = settings.get("timeouts", {})
-        self.relaunch_timeout_input.setValue(timeouts.get("relaunch", 20))
-        self.offline_threshold_input.setValue(timeouts.get("offline", 35))
-        self.launch_delay_input.setValue(timeouts.get("launch_delay", 4))
-
-    def save_and_close(self):
-        """Save settings and close"""
-        settings = {
-            "place_id": self.place_id_input.text(),
-            "window_limit": self.window_limit_input.value(),
-            "excluded_pid": self.excluded_pid_input.value(),
-            "check_intervals": {
-                "window": self.window_check_input.value(),
-                "presence": self.presence_check_input.value(),
-                "cleanup": self.cleanup_interval_input.value()
-            },
-            "timeouts": {
-                "relaunch": self.relaunch_timeout_input.value(),
-                "offline": self.offline_threshold_input.value(),
-                "launch_delay": self.launch_delay_input.value()
-            }
-        }
-
-        if self.config_manager.save_settings(settings):
-            config_info = self.config_manager.get_config_info()
-            QMessageBox.information(self, "Success",
-                                  f"Settings saved successfully!\n\n"
-                                  f"Location: {config_info['settings_file']}\n"
-                                  f"Backup created in: {config_info['backup_dir']}")
-            self.accept()
-        else:
-            QMessageBox.critical(self, "Error",
-                               "Failed to save settings. Please check the logs for details.")
 
 class RobloxManagerGUI(QMainWindow):
     """Main GUI window for Roblox Manager"""
@@ -1316,10 +1189,7 @@ class RobloxManagerGUI(QMainWindow):
         exit_action = file_menu.addAction("Exit")
         exit_action.triggered.connect(self.close)
 
-        settings_menu = menubar.addMenu("Settings")
 
-        preferences_action = settings_menu.addAction("Preferences")
-        preferences_action.triggered.connect(self.open_settings)
 
         help_menu = menubar.addMenu("Help")
 
@@ -1507,17 +1377,66 @@ class RobloxManagerGUI(QMainWindow):
         settings_widget = QWidget()
         layout = QVBoxLayout(settings_widget)
 
-        info_label = QLabel("Configure settings")
-        info_label.setStyleSheet(f"color: {ModernStyle.TEXT_SECONDARY}; margin-bottom: 10px;")
-        layout.addWidget(info_label)
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
 
-        settings_btn = QPushButton("Open Settings")
-        settings_btn.clicked.connect(self.open_settings)
-        layout.addWidget(settings_btn)
+        content_widget = QWidget()
+        content_layout = QVBoxLayout(content_widget)
 
-        layout.addStretch()
+        basic_group = QGroupBox("Basic Settings")
+        basic_layout = QFormLayout(basic_group)
+
+        self.settings_place_id_input = QLineEdit()
+        self.settings_place_id_input.setPlaceholderText("Enter Roblox Place ID")
+        basic_layout.addRow("Place ID:", self.settings_place_id_input)
+
+        self.settings_window_limit_input = QSpinBox()
+        self.settings_window_limit_input.setRange(1, 5)
+        self.settings_window_limit_input.setToolTip("Maximum windows per Roblox process")
+        basic_layout.addRow("Window Limit:", self.settings_window_limit_input)
+
+        content_layout.addWidget(basic_group)
+
+        timing_group = QGroupBox("Timing Settings")
+        timing_layout = QFormLayout(timing_group)
+
+        self.settings_offline_threshold_input = QSpinBox()
+        self.settings_offline_threshold_input.setRange(15, 120)
+        self.settings_offline_threshold_input.setSuffix(" seconds")
+        self.settings_offline_threshold_input.setToolTip("How long to wait before restarting inactive users")
+        timing_layout.addRow("Restart Inactive After:", self.settings_offline_threshold_input)
+
+        self.settings_launch_delay_input = QSpinBox()
+        self.settings_launch_delay_input.setRange(2, 15)
+        self.settings_launch_delay_input.setSuffix(" seconds")
+        self.settings_launch_delay_input.setToolTip("Delay between launching sessions")
+        timing_layout.addRow("Launch Delay:", self.settings_launch_delay_input)
+
+        content_layout.addWidget(timing_group)
+
+        buttons_layout = QHBoxLayout()
+
+        save_settings_btn = QPushButton("Save Settings")
+        save_settings_btn.setProperty("class", "success")
+        save_settings_btn.clicked.connect(self.save_settings)
+        buttons_layout.addWidget(save_settings_btn)
+
+        reset_settings_btn = QPushButton("Reset to Defaults")
+        reset_settings_btn.clicked.connect(self.reset_settings)
+        buttons_layout.addWidget(reset_settings_btn)
+
+        buttons_layout.addStretch()
+
+        content_layout.addLayout(buttons_layout)
+        content_layout.addStretch()
+
+        scroll_area.setWidget(content_widget)
+        layout.addWidget(scroll_area)
 
         self.tab_widget.addTab(settings_widget, "Settings")
+
+        self.load_settings_tab()
 
     def setup_credits_tab(self):
         credits_widget = QWidget()
@@ -1906,10 +1825,55 @@ class RobloxManagerGUI(QMainWindow):
             self.add_log("User configuration updated")
 
     def open_settings(self):
-        """Open settings dialog"""
-        dialog = SettingsDialog(self)
-        if dialog.exec() == QDialog.DialogCode.Accepted:
+        """Switch to settings tab"""
+        self.tab_widget.setCurrentIndex(4)
+
+    def load_settings_tab(self):
+        """Load current settings into the settings tab"""
+        settings = self.config_manager.load_settings()
+
+        self.settings_place_id_input.setText(settings.get("place_id", "85896571713843"))
+        self.settings_window_limit_input.setValue(settings.get("window_limit", 1))
+
+        timeouts = settings.get("timeouts", {})
+        self.settings_offline_threshold_input.setValue(timeouts.get("offline", 35))
+        self.settings_launch_delay_input.setValue(timeouts.get("launch_delay", 4))
+
+    def save_settings(self):
+        """Save settings from the settings tab"""
+        settings = {
+            "place_id": self.settings_place_id_input.text(),
+            "window_limit": self.settings_window_limit_input.value(),
+            "excluded_pid": 0,
+            "check_intervals": {
+                "window": 3.0,
+                "presence": 1.5,
+                "cleanup": 30.0
+            },
+            "timeouts": {
+                "relaunch": 20,
+                "offline": self.settings_offline_threshold_input.value(),
+                "launch_delay": self.settings_launch_delay_input.value()
+            }
+        }
+
+        if self.config_manager.save_settings(settings):
+            QMessageBox.information(self, "Success", "Settings saved successfully!")
             self.add_log("Settings updated")
+        else:
+            QMessageBox.critical(self, "Error", "Failed to save settings. Please check the logs for details.")
+
+    def reset_settings(self):
+        """Reset settings to defaults"""
+        reply = QMessageBox.question(self, "Reset Settings",
+                                   "Are you sure you want to reset all settings to defaults?",
+                                   QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if reply == QMessageBox.StandardButton.Yes:
+            self.settings_place_id_input.setText("85896571713843")
+            self.settings_window_limit_input.setValue(1)
+            self.settings_offline_threshold_input.setValue(35)
+            self.settings_launch_delay_input.setValue(4)
+            QMessageBox.information(self, "Reset Complete", "Settings have been reset to defaults. Click 'Save Settings' to apply.")
 
     def show_config_location(self):
         """Show configuration location dialog"""
