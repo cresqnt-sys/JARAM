@@ -3,19 +3,26 @@ import json
 import time
 import os
 import shutil
+import requests
+import psutil
+import re
 from datetime import datetime
 from pathlib import Path
+from urllib.request import urlopen
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                             QHBoxLayout, QGridLayout, QTabWidget, QTableWidget,
                             QTableWidgetItem, QPushButton, QLabel, QLineEdit,
-                            QSpinBox, QTextEdit, QGroupBox,
+                            QSpinBox, QTextEdit, QGroupBox,QStackedLayout,
                             QProgressBar, QComboBox, QCheckBox, QSplitter,
                             QHeaderView, QMessageBox, QDialog, QDialogButtonBox,
                             QFormLayout, QScrollArea, QFrame, QSizePolicy)
-from PyQt6.QtCore import QTimer, QThread, pyqtSignal, Qt, QSize
-from PyQt6.QtGui import QFont, QIcon, QPalette, QColor, QPixmap, QPainter
+from PyQt6.QtCore import QTimer, QThread, pyqtSignal, Qt, QSize,  QBuffer, QByteArray, QIODevice, QRectF, QPointF
+from PyQt6.QtGui import QFont, QIcon, QPalette, QColor, QPixmap, QPainter, QMovie, QRegion, QPainterPath
 from main import RobloxManager, ProcessManager, GameLauncher
 from cookie_extractor import CookieExtractor
+from RAM_export import transform         # re-use your parsing helper
+from main import limit_strap_helpers
+from log_utils import find_log_for_username, R_DISC_REASON, R_DISC_NOTIFY, R_DISC_SENDING, R_CONN_LOST
 
 def _get_icon_path():
 
@@ -43,23 +50,33 @@ class ConfigManager:
         self.users_file = self.config_dir / "users.json"
         self.settings_file = self.config_dir / "settings.json"
         self.backup_dir = self.config_dir / "backups"
+        
 
         self._ensure_directories()
 
         self.default_settings = {
             "window_limit": 1,
             "timeouts": {
-                "offline": 35,
-                "launch_delay": 4
+                "strap_threshold": 10,
+                "offline"             : 25,   # restart-after-inactive
+                "launch_delay"        : 10,    # normal relaunch cadence
+                "initial_delay"       : 10,     # seconds between first-run launches
+                "kill_timeout"        : 1740,  # 29m
+                "poll_interval"       : 10,
+                "webhook_url"         : "",     # fill in GUI
+                "ping_message"        : "<@YourPing> This message is sent whenever your active processes drop to 1 or 0, for debugging. Leave webhook empty if not interested"
             }
         }
+
 
         self.default_user_structure = {
             "username": "",
             "cookie": "",
             "private_server_link": "",
-            "place": ""
+            "place": "",
+            "bad": False
         }
+        
 
     def _get_config_directory(self):
         if os.name == 'nt':  
@@ -122,6 +139,15 @@ class ConfigManager:
             if temp_path.exists():
                 temp_path.unlink()
             raise e
+    # ADD this helper anywhere inside the class
+    def _deep_update(self, base: dict, updates: dict):
+        """Recursive dict.update so nested keys survive partial files."""
+        for k, v in updates.items():
+            if isinstance(v, dict) and isinstance(base.get(k), dict):
+                base[k] = self._deep_update(base[k], v)
+            else:
+                base[k] = v
+        return base
 
     def load_users(self):
         try:
@@ -152,15 +178,15 @@ class ConfigManager:
         try:
             if self.settings_file.exists():
                 with open(self.settings_file, 'r', encoding='utf-8') as f:
-                    loaded_settings = json.load(f)
+                    loaded = json.load(f)
 
-                    settings = self.default_settings.copy()
-                    settings.update(loaded_settings)
-                    return settings
+                settings = json.loads(json.dumps(self.default_settings))  # deep copy
+                settings = self._deep_update(settings, loaded)
+                return settings
             else:
-                return self.default_settings.copy()
-        except Exception as e:
-            return self.default_settings.copy()
+                return json.loads(json.dumps(self.default_settings))
+        except Exception:
+            return json.loads(json.dumps(self.default_settings))
 
     def save_settings(self, settings_data):
         try:
@@ -197,7 +223,8 @@ class ConfigManager:
                     "username": f"User_{user_id}",  
                     "cookie": cookie,
                     "private_server_link": "",
-                    "place": ""
+                    "place": "",
+                    "bad": False
                 }
             else:
 
@@ -224,7 +251,8 @@ class ConfigManager:
                     "username": user_info.get("username", f"User_{user_id}"),
                     "cookie": user_info.get("cookie", ""),
                     "private_server_link": user_info.get("private_server_link", ""),
-                    "place": user_info.get("place", "")
+                    "place": user_info.get("place", ""),
+                    "bad":  user_info.get("bad", False)
                 }
             else:
 
@@ -232,9 +260,22 @@ class ConfigManager:
                     "username": f"User_{user_id}",
                     "cookie": "",
                     "private_server_link": "",
-                    "place": ""
+                    "place": "",
+                    "bad":  ""
                 }
         return new_data
+
+    def mark_bad_cookie(self, user_id: str, state: bool) -> None:
+        users = self.load_users()
+        if user_id in users and users[user_id].get("bad", False) != state:
+            users[user_id]["bad"] = state
+            self.save_users(users)
+
+    def clear_all_bad_flags(self):
+        users = self.load_users()
+        for info in users.values():
+            info["bad"] = False
+        self.save_users(users)
 
     def get_users_for_manager(self):
         users = self.load_users()
@@ -260,6 +301,19 @@ class ConfigManager:
             "settings_file": str(self.settings_file),
             "backup_dir": str(self.backup_dir)
         }
+        
+    def mark_user_bad_cookie(self, user_id):
+        users = self.load_users()
+        if user_id in users:
+            users[user_id]["bad_cookie"] = True
+            self.save_users(users)
+
+    def clear_all_bad_cookies(self):
+        users = self.load_users()
+        for user in users.values():
+            user["bad_cookie"] = False
+        self.save_users(users)
+
 
 class ModernStyle:
     BACKGROUND = "#1e1e1e"
@@ -438,6 +492,11 @@ class ModernStyle:
             background-color: {ModernStyle.PRIMARY};
             border-color: {ModernStyle.PRIMARY};
         }}
+        
+        QCheckBox::indicator:disabled {{
+            background-color: {ModernStyle.SURFACE};
+            border-color: {ModernStyle.SURFACE};
+        }}
 
         QScrollBar:vertical {{
             background-color: {ModernStyle.SURFACE};
@@ -457,49 +516,125 @@ class ModernStyle:
         """
 
 class WorkerThread(QThread):
-    log_signal = pyqtSignal(str)
-    status_signal = pyqtSignal(dict)
+    log_signal     = pyqtSignal(str)
+    status_signal  = pyqtSignal(dict)
     process_signal = pyqtSignal(dict)
 
-    def __init__(self):
+    def __init__(self, cfg_manager):
         super().__init__()
-        self.running = False
-        self.manager = None
-        self.process_mgr = None
-        self.launcher = None
-        self.user_states = {}
-        self.timing_trackers = {}
+        self.cfg_manager      = cfg_manager
+        self.running          = False
+        self.manager          = None
+        self.process_mgr      = None
+        self.launcher         = None
+        self.user_states      = {}
+        self.log_pointers     = {}      #  NEW  {uid: last_byte_read}
+        self.timing_trackers  = {}
 
-    def initialize_manager(self):
+        # thread-local mirrors (set after manager loads)
+        self.restart_threshold = 0
+        self.strap_threshold = 50
+        self.initial_delay     = 0
+        
+        self._last_proc_count = 0
+        self._last_growth_ts  = time.time()
+        
+        self.log_inactivity_timeout = 120      # seconds (2 min)
+
+    def _trace(self, uid: str, msg: str, *, every: float = 30.0) -> None:
+        """
+        Emit at most one identical trace per user every *every* seconds.
+        Grouping key = (uid, first word of msg).
+        """
+        now = time.time()
+        key = (uid, msg.split()[0])               # e.g., (“8735…”, “read”)
+        if not hasattr(self, "_trace_ts"):
+            self._trace_ts = {}
+        last = self._trace_ts.get(key, 0.0)
+
+        if now - last >= every:
+            self.log_signal.emit(f"[SCAN-TRACE] {uid}: {msg}")
+            self._trace_ts[key] = now
+
+    def _log(self, msg: str):
+        """Thread-safe logger → GUI Logs tab."""
+        self.log_signal.emit(msg)
+
+    def initialize_manager(self) -> bool:
         try:
-            self.manager = RobloxManager()
+            self.manager = RobloxManager(config_manager=self.cfg_manager)
+
+            self.manager.timeout_monitor.start()
+            
+            self.restart_threshold = self.manager.timeouts["offline"]
+            self.initial_delay     = self.manager.timeouts["initial_delay"]
+
             self.process_mgr = ProcessManager(self.manager.excluded_pid)
             self.launcher = GameLauncher(
                 self.manager.target_place,
                 self.process_mgr,
                 self.manager.auth_handler,
-                self.manager.process_tracker
+                self.manager.process_tracker,
+                self.manager.config_manager,
+                launch_delay = self.manager.timeouts["launch_delay"],
+                initial_delay= self.manager.timeouts["initial_delay"]
             )
 
-            self.user_states = {user_id: {
-                "last_active": 0,
-                "inactive_since": None,
-                "user_info": user_info,
-                "requires_restart": False,
-                "status": "Initializing",
-                "last_check": 0
-            } for user_id, user_info in self.manager.settings.items()}
+            now = time.time()
+            while not self.manager.timeout_monitor.msg_q.empty():
+                self.log_signal.emit(self.manager.timeout_monitor.msg_q.get_nowait())
+            self.user_states = {
+                uid: {
+                    "last_active"    : now,
+                    "inactive_since" : None,
+                    "user_info"      : info,
+                    "requires_restart": False,
+                    "status"         : "Initializing"
+                } for uid, info in self.manager.settings.items()
+            }
+            for uid, info in self.manager.settings.items():
+                username = info.get("username") if isinstance(info, dict) else None
+                log_path = find_log_for_username(username, allow_fallback=False)
+                if log_path and os.path.isfile(log_path):
+                    self.log_pointers[uid] = os.path.getsize(log_path)
+                else:
+                    self.log_pointers[uid] = 0
+
 
             self.timing_trackers = {
-                'window_check': 0,
-                'relaunch': 0,
-                'cleanup': 0,
-                'orphan_check': 0
+                'window'  : 0,
+                'cleanup' : 0,
+                'relaunch': 0
             }
-
             return True
         except Exception as e:
+            self.log_signal.emit(f"Manager init failed: {e}")
             return False
+
+    def apply_new_settings(self, cfg: dict):
+        if not self.manager:
+            return
+        self.manager.window_limit               = cfg["window_limit"]
+        self.manager.timeouts["launch_delay"]   = cfg["timeouts"]["launch_delay"]
+        self.manager.timeouts["offline"]        = cfg["timeouts"]["offline"]
+        self.manager.timeouts["initial_delay"]  = cfg["timeouts"]["initial_delay"]
+        self.strap_threshold = cfg["timeouts"].get("strap_threshold", 50)
+
+        
+        tm = cfg["timeout_monitor"]
+        self.manager.timeout_monitor.kill_timeout        = tm["kill_timeout"]
+        self.manager.timeout_monitor.poll_interval       = tm["poll_interval"]
+        self.manager.timeout_monitor.webhook_url         = tm["webhook_url"]
+        self.manager.timeout_monitor.ping_message        = tm["ping_message"]
+
+        self.restart_threshold = cfg["timeouts"]["offline"]
+        self.initial_delay     = cfg["timeouts"]["initial_delay"]
+
+        if self.launcher:
+            self.launcher.launch_delay  = cfg["timeouts"]["launch_delay"]
+            self.launcher.initial_delay = cfg["timeouts"]["initial_delay"]
+
+
 
     def restart_user_session(self, user_id):
         if not self.manager or user_id not in self.user_states:
@@ -526,20 +661,18 @@ class WorkerThread(QThread):
         except Exception as e:
             return False
 
-    def kill_user_processes(self, user_id):
+    def kill_user_processes(self, user_id: str) -> bool:
         if not self.manager or user_id not in self.user_states:
             return False
 
         try:
-            killed_count = 0
             for pid in self.manager.process_tracker.user_processes.get(user_id, []).copy():
-                if self.process_mgr.verify_process_active(pid):
-                    if self.process_mgr.terminate_process(pid, self.manager.process_tracker):
-                        killed_count += 1
-
+                # always attempt to kill – even if verify() says it's gone or renamed
+                self.process_mgr.terminate_process(pid, self.manager.process_tracker)
             return True
-        except Exception as e:
+        except Exception:
             return False
+
 
     def kill_all_processes(self):
         if not self.process_mgr:
@@ -567,143 +700,205 @@ class WorkerThread(QThread):
 
         self.running = True
 
-        try:
-            self.launcher.initialize_all_sessions(self.manager.settings)
-        except Exception as e:
-            pass
+        # one-by-one first launch
+        self.launcher.initialize_all_sessions(self.manager.settings)
 
         while self.running:
-            current_timestamp = time.time()
+            now = time.time()
 
-            try:
+            # -- housekeeping
+            if now - self.timing_trackers['cleanup'] >= self.manager.check_intervals['cleanup']:
+                self.process_mgr.cleanup_dead_processes(self.manager.process_tracker)
+                self.timing_trackers['cleanup'] = now
 
-                if current_timestamp - self.timing_trackers['cleanup'] >= self.manager.check_intervals['cleanup']:
-                    self.process_mgr.cleanup_dead_processes(self.manager.process_tracker)
-                    self.timing_trackers['cleanup'] = current_timestamp
+            if now - self.timing_trackers['window'] >= self.manager.check_intervals['window']:
+                for pid, nwin in self.process_mgr.count_windows_by_process().items():
+                    if nwin > self.manager.window_limit and pid != self.manager.excluded_pid:
+                        self.process_mgr.terminate_process(pid, self.manager.process_tracker)
+                self.timing_trackers['window'] = now
+            
+            # ── low-count watchdog ───────────────────────────────────────────
+            STUCK_TIMEOUT = 300        # seconds without growth  → action (5 min)
 
-                if current_timestamp - self.timing_trackers['orphan_check'] >= (self.manager.check_intervals['cleanup'] * 2):
-                    self.process_mgr.eliminate_orphaned_processes(
-                        self.manager.process_tracker,
-                        set(self.manager.settings.keys())
-                    )
-                    self.timing_trackers['orphan_check'] = current_timestamp
+            total_users = len(self.manager.settings)
 
-                if current_timestamp - self.timing_trackers['window_check'] >= self.manager.check_intervals['window']:
-                    window_counts = self.process_mgr.count_windows_by_process()
+            active_processes = sum(
+                1
+                for p in psutil.process_iter(['name', 'pid'])
+                if p.info['name'] == 'RobloxPlayerBeta.exe'
+                and p.info['pid'] != self.manager.excluded_pid
+            )
 
-                    process_data = {}
-                    for pid, user_id in self.manager.process_tracker.process_owners.items():
-                        if self.process_mgr.verify_process_active(pid):
-                            create_time = self.manager.process_tracker.creation_timestamps.get(pid, 0)
-                            window_count = window_counts.get(pid, 0)
-                            process_data[pid] = {
-                                'user_id': user_id,
-                                'created': datetime.fromtimestamp(create_time).strftime("%H:%M:%S") if create_time else "Unknown",
-                                'windows': window_count
-                            }
+            # reset timer whenever the process count grows
+            if active_processes > self._last_proc_count:
+                self._last_proc_count = active_processes
+                self._last_growth_ts  = now
+            else:
+                self._last_proc_count = active_processes
 
-                    self.process_signal.emit(process_data)
+            # condition met: fewer PIDs than users **and** no growth for ≥ STUCK_TIMEOUT
+            if active_processes < total_users and (now - self._last_growth_ts) >= STUCK_TIMEOUT:
+                # Trim helpers but preserve the single oldest instance
+                limit_strap_helpers(threshold=1, kill_all=False)
+                self._last_growth_ts = now    # restart the timer
 
-                    for pid, count in window_counts.items():
-                        if count > self.manager.window_limit and pid != self.manager.excluded_pid:
-                            self.process_mgr.terminate_process(pid, self.manager.process_tracker)
 
-                    self.timing_trackers['window_check'] = current_timestamp
+            # -- per-user heartbeat ----------------------------------------
+            status = {}
+            kill_t = self.manager.timeout_monitor.kill_timeout
 
-                status_data = {}
-                for user_id, state in self.user_states.items():
+            for uid, st in self.user_states.items():
 
-                    if current_timestamp - state.get("last_check", 0) < 3:
+                # ── 1. bad-cookie rows stay, but never launch ───────────────
+                if st["user_info"].get("bad", False):
+                    st["status"] = "Bad"
 
-                        status_data[user_id] = {
-                            'status': state.get('status', 'Unknown'),
-                            'pids': self.manager.process_tracker.user_processes.get(user_id, []),
-                            'needs_restart': state.get("requires_restart", False),
-                            'last_active': state.get("last_active", 0),
-                            'inactive_since': state.get("inactive_since")
-                        }
+                    # make a minimal row so the GUI can display it
+                    status[uid] = {
+                        "status"        : "Bad",
+                        "pids"          : [],          # none running
+                        "needs_restart" : False,
+                        "last_active"   : st["last_active"],
+                        "inactive_since": st["inactive_since"],
+                        "ttl"           : []
+                    }
+                    continue                           # skip launch / restart logic # do NOT manage this account
+                live = [
+                    pid for pid in self.manager.process_tracker.user_processes.get(uid, [])
+                    if self.process_mgr.verify_process_active(pid)
+                ]
+                
+                # ── instant disconnect detection ─────────────────────────────
+                uname     = str(st.get("user_info", {}).get("username", "")).lower()
+                log_path  = find_log_for_username(uname, allow_fallback=False)
+                disconnect_code = None         # will hold “276”, “17”, etc.
+
+                if not live:
+                    self._trace(uid, "skip — no live proc")
+                elif not log_path or not os.path.isfile(log_path):
+                    self._trace(uid, f"skip — log not found ({log_path})")
+                else:
+                    try:
+                        last_pos   = self.log_pointers.get(uid, 0)
+                        current_sz = os.path.getsize(log_path)
+
+                        # log rotated? → start scanning from END to avoid old lines
+                        if current_sz < last_pos:
+                            last_pos = current_sz
+
+                        # read only new bytes
+                        with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
+                            f.seek(last_pos)
+                            chunk = f.read()
+
+                        self.log_pointers[uid] = current_sz
+                        if chunk:
+                            self._trace(uid, f"read {len(chunk)} bytes")
+
+                            for line in chunk.splitlines():
+                                # ── skip chat-relay lines like
+                                #    “… Incoming MessageReceived … Text: [FLog::Network] …”
+                                pos_net = line.lower().find("[flog::network]")
+                                pos_txt = line.lower().find("text:")
+
+                                if pos_txt != -1 and pos_txt < pos_net:
+                                    continue          # embedded quote – not a genuine network log
+
+                                # --- genuine disconnect markers ---------------------------------
+                                if   (m := R_DISC_REASON.search(line)) \
+                                or (m := R_DISC_NOTIFY.search(line)) \
+                                or (m := R_DISC_SENDING.search(line)):
+                                    disconnect_code = m.group(1)
+                                    break
+                                elif R_CONN_LOST.search(line):
+                                    disconnect_code = "unknown"
+                                    break
+                            if disconnect_code is not None:
+                                self.log_signal.emit(
+                                    f"⚠️  {uname} disconnect detected (reason {disconnect_code}) – terminating process"
+                                )
+                                self.kill_user_processes(uid)
+                                st["requires_restart"] = True
+
+                    except Exception as e:
+                        self._trace(uid, f"log scan error: {e}")
+
+                # ----- TTL list (for display) -----------------------------
+                ttl_list = []
+                for pid in live:
+                    ct  = self.manager.process_tracker.creation_timestamps.get(pid, now)
+                    ttl = max(0, int(kill_t - (now - ct)))
+                    ttl_list.append(ttl)
+
+                # ----- state machine --------------------------------------
+                if live:                                        # client running
+                    st["last_active"]     = now
+                    st["inactive_since"]  = None
+                    st["requires_restart"]= False
+                    st["status"]          = "Active"
+                else:                                           # all windows gone
+                    if st["inactive_since"] is None:
+                        st["inactive_since"] = now
+                    idle = now - st["inactive_since"]
+                    st["status"] = f"Inactive ({int(idle)} s)"
+                    if idle >= self.restart_threshold:
+                        st["requires_restart"] = True
+
+                # ----- row sent to GUI ------------------------------------
+                status[uid] = {
+                    "status"        : st["status"],
+                    "pids"          : live,
+                    "needs_restart" : st["requires_restart"],
+                    "last_active"   : st["last_active"],
+                    "inactive_since": st["inactive_since"],
+                    "ttl"           : ttl_list
+
+                }
+
+            self.status_signal.emit(status)
+
+            # 1️⃣  build a dict:  pid -> {user_id, created, windows}
+            proc_info = {}
+            for uid, pids in self.manager.process_tracker.user_processes.items():
+                for pid in pids:
+                    if not self.process_mgr.verify_process_active(pid):
                         continue
-
-                    cookie = state["user_info"].get("cookie", "") if isinstance(state["user_info"], dict) else state["user_info"]
-                    activity_status = self.manager.presence_monitor.check_user_activity(
-                        user_id, cookie, self.manager.auth_handler
-                    )
-
-                    state["last_check"] = current_timestamp
-
-                    if activity_status is None:
-
-                        status_data[user_id] = {
-                            'status': state.get('status', 'API Error'),
-                            'pids': self.manager.process_tracker.user_processes.get(user_id, []),
-                            'needs_restart': state.get("requires_restart", False),
-                            'last_active': state.get("last_active", 0),
-                            'inactive_since': state.get("inactive_since")
-                        }
-                        continue
-
-                    if activity_status:
-                        self.user_states[user_id]["last_active"] = current_timestamp
-                        self.user_states[user_id]["inactive_since"] = None
-                        self.user_states[user_id]["requires_restart"] = False
-                        self.user_states[user_id]["status"] = "Active"
-                        status = "Active"
-                    else:
-                        if self.user_states[user_id]["inactive_since"] is None:
-                            self.user_states[user_id]["inactive_since"] = current_timestamp
-
-                        inactive_duration = current_timestamp - self.user_states[user_id]["inactive_since"]
-                        if inactive_duration >= self.manager.timeouts['offline']:
-                            if not self.user_states[user_id]["requires_restart"]:
-                                self.user_states[user_id]["requires_restart"] = True
-
-                        status = f"Inactive ({int(inactive_duration)}s)"
-                        self.user_states[user_id]["status"] = status
-
-                    pids = self.manager.process_tracker.user_processes.get(user_id, [])
-
-                    status_data[user_id] = {
-                        'status': status,
-                        'pids': pids,
-                        'needs_restart': self.user_states[user_id]["requires_restart"],
-                        'last_active': self.user_states[user_id]["last_active"],
-                        'inactive_since': self.user_states[user_id]["inactive_since"]
+                    created = datetime.fromtimestamp(
+                        self.manager.process_tracker.creation_timestamps.get(pid, time.time())
+                    ).strftime("%H:%M:%S")
+                    windows = self.process_mgr.count_windows_by_process().get(pid, 0)
+                    proc_info[pid] = {
+                        "user_id": uid,
+                        "created": created,
+                        "windows": windows,
                     }
 
-                self.status_signal.emit(status_data)
+            # 2️⃣  notify the GUI
+            self.process_signal.emit(proc_info)
 
-                restart_candidates = [user_id for user_id, state in self.user_states.items()
-                                    if state["requires_restart"]]
-
-                if restart_candidates and (current_timestamp - self.timing_trackers['relaunch']) >= self.manager.timeouts['launch_delay']:
-                    target_user = restart_candidates[0]
-                    target_state = self.user_states[target_user]
-
-                    running_pids = []
-                    for pid in self.manager.process_tracker.user_processes.get(target_user, []):
-                        if self.process_mgr.verify_process_active(pid):
-                            running_pids.append(pid)
-
-                    if running_pids:
-                        for pid in running_pids:
-                            self.process_mgr.terminate_process(pid, self.manager.process_tracker)
-
-                    target_cookie = target_state["user_info"].get("cookie", "") if isinstance(target_state["user_info"], dict) else target_state["user_info"]
-                    try:
-                        if self.launcher.start_game_session(target_user, target_cookie, target_state["user_info"]):
-                            self.user_states[target_user]["inactive_since"] = None
-                            self.user_states[target_user]["requires_restart"] = False
-                            self.user_states[target_user]["status"] = "Restarting"
-                            self.timing_trackers['relaunch'] = current_timestamp
-                    except Exception as e:
-                        pass
-
-            except Exception as error:
-                pass
-
-            time.sleep(self.manager.check_intervals['presence'])
+            # auto-restart oldest candidate
+            restartables = [
+                u for u, s in self.user_states.items()
+                if s["requires_restart"] and not s["user_info"].get("bad", False)            
+]
+            if restartables and (now - self.timing_trackers['relaunch']) >= self.manager.timeouts["launch_delay"]:
+                uid   = restartables[0]
+                info  = self.user_states[uid]["user_info"]
+                cookie = info.get("cookie", "") if isinstance(info, dict) else info
+                self.launcher.start_game_session(uid, cookie, info)
+                self.user_states[uid]["inactive_since"] = None
+                self.user_states[uid]["requires_restart"] = False
+                self.user_states[uid]["status"] = "Restarting"
+                self.timing_trackers['relaunch'] = now
+                
+                            # ── strap.exe limiter (queue empty) ───────────────────────
+            if not restartables:
+                limit_strap_helpers(threshold=self.strap_threshold)
+            time.sleep(self.manager.check_intervals['main_tick'])
 
     def stop(self):
+        if self.manager and self.manager.timeout_monitor:
+            self.manager.timeout_monitor.stop()
         self.running = False
 
 class UserManagementDialog(QDialog):
@@ -720,6 +915,8 @@ class UserManagementDialog(QDialog):
         self.selected_user_id = None
         self.setup_ui()
         self.load_users()
+        self.skip_private_server_warning = False      # session-only
+
 
     def setup_ui(self):
         main_layout = QVBoxLayout(self)
@@ -805,8 +1002,8 @@ class UserManagementDialog(QDialog):
         form_container = QWidget()
         form_container.setStyleSheet(f"""
             QWidget {{
-                background-color: {ModernStyle.SURFACE};
-                border: 1px solid {ModernStyle.BORDER};
+                background-color: {ModernStyle.BACKGROUND};
+                border: 1px solid {ModernStyle.SURFACE};
                 border-radius: 8px;
                 padding: 15px;
             }}
@@ -827,13 +1024,13 @@ class UserManagementDialog(QDialog):
         form_layout.addWidget(self.username_input)
 
         self.private_server_input = QLineEdit()
-        self.private_server_input.setPlaceholderText("Enter private server link (required)")
+        self.private_server_input.setPlaceholderText("Enter private server link (recommended)")
         self.private_server_input.setStyleSheet(self._get_input_style())
         form_layout.addWidget(QLabel("Private Server Link:"))
         form_layout.addWidget(self.private_server_input)
 
         self.place_input = QLineEdit()
-        self.place_input.setPlaceholderText("Enter place/game name (optional)")
+        self.place_input.setPlaceholderText("Enter place ID")
         self.place_input.setStyleSheet(self._get_input_style())
         form_layout.addWidget(QLabel("Place:"))
         form_layout.addWidget(self.place_input)
@@ -1178,9 +1375,10 @@ class UserManagementDialog(QDialog):
             username = f"User_{user_id}"
 
         if not private_server_link:
-            QMessageBox.warning(self, "Error", "Private server link cannot be empty!")
-            self.private_server_input.setFocus()
-            return
+            if not self._confirm_missing_ps_link():
+                self.private_server_input.setFocus()
+                return
+
 
         if not cookie:
             QMessageBox.warning(self, "Error", "Cookie cannot be empty!")
@@ -1191,12 +1389,38 @@ class UserManagementDialog(QDialog):
             "username": username,
             "private_server_link": private_server_link,
             "place": place,
-            "cookie": cookie
+            "cookie": cookie,
+            "bad": False
         }
 
         self.refresh_user_list()
         self.cancel_edit()
         QMessageBox.information(self, "Success", f"User {user_id} ({username}) updated successfully!")
+
+    def _confirm_missing_ps_link(self) -> bool:
+        """Return True to proceed with save, False to cancel."""
+        if self.skip_private_server_warning:
+            return True
+
+        box = QMessageBox(self)
+        box.setWindowTitle("No Private Server Link")
+        box.setIcon(QMessageBox.Icon.Warning)
+        box.setText(
+            "You didn’t enter a Private Server Link.\n\n"
+            "If you continue, the account will launch into a public server "
+            "using ‘Place:’ (or Sols RNG public lobby if that's missing as well)."
+        )
+        box.setInformativeText("Save anyway?")
+        box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
+        box.setDefaultButton(QMessageBox.StandardButton.Yes)
+
+        chk = QCheckBox("Don’t warn me again")
+        box.setCheckBox(chk)
+
+        decision = box.exec() == QMessageBox.StandardButton.Yes
+        if decision and chk.isChecked():
+            self.skip_private_server_warning = True   # remember only for this run
+        return decision
 
     def add_user(self):
         user_id = self.user_id_input.text().strip()
@@ -1221,9 +1445,9 @@ class UserManagementDialog(QDialog):
             return
 
         if not private_server_link:
-            QMessageBox.warning(self, "Error", "Please enter a Private Server Link")
-            self.private_server_input.setFocus()
-            return
+            if not self._confirm_missing_ps_link():
+                self.private_server_input.setFocus()
+                return
 
         if not cookie:
             QMessageBox.warning(self, "Error", "Please enter a Cookie")
@@ -1263,7 +1487,8 @@ class UserManagementDialog(QDialog):
                 "username": username,
                 "private_server_link": private_server_link,
                 "place": place,
-                "cookie": cookie
+                "cookie": cookie,
+                "bad": False
             }
 
             self.user_id_input.clear()
@@ -1349,6 +1574,48 @@ class UserManagementDialog(QDialog):
             QMessageBox.critical(self, "Error",
                                "Failed to save user configuration. Please check the logs for details.")
 
+
+class BorderRing(QWidget):
+    """Transparent widget that draws a circular ring and ignores mouse events."""
+    def __init__(self, diameter: int, border_px: int, colour: str, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(diameter, diameter)
+
+        # NEW — tell Qt to honour the stylesheet even with a transparent bg
+        self.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+
+        self.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+
+        self.setStyleSheet(
+            f"border:{border_px}px solid {colour};"
+            f"border-radius:{diameter//2}px;"
+            "background:transparent;"
+        )
+
+
+class RoundMovieLabel(QLabel):
+    def __init__(self, diameter: int, border_px: int, border_color: str, parent=None):
+        super().__init__(parent)
+        self.setFixedSize(diameter, diameter)
+        self.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.setStyleSheet(
+            f"border:{border_px}px solid {border_color};"
+            f"border-radius:{diameter//2}px;"
+            f"background-color:{ModernStyle.SURFACE};"
+        )
+
+        # ── build a mask that ends halfway through the ring ──────────────
+        half = diameter / 2
+        r    = half - border_px / 1          # 60 − 1.5 = 58.5  (includes border)
+        path = QPainterPath()
+        path.addEllipse(QPointF(half, half), r, r)
+        self.setMask(QRegion(path.toFillPolygon().toPolygon()))
+
+        # inner square you can show safely (used for movie scaling)
+        self._inner_side = int(round(r * 2))   # 117 px
+
+
+        
 class RobloxManagerGUI(QMainWindow):
 
     def __init__(self):
@@ -1360,7 +1627,7 @@ class RobloxManagerGUI(QMainWindow):
         self.setup_timers()
 
     def setup_ui(self):
-        self.setWindowTitle("JARAM - Just Another Roblox Account Manager")
+        self.setWindowTitle("Jirach1 + JARAM - Just Another Roblox Account Manager")
         self.setGeometry(100, 100, 1200, 800)
 
         icon_path = _get_icon_path()
@@ -1373,7 +1640,7 @@ class RobloxManagerGUI(QMainWindow):
 
         header_layout = QHBoxLayout()
 
-        title_label = QLabel("JARAM - Just Another Roblox Account Manager")
+        title_label = QLabel("Jirach1 + JARAM - Just Another Roblox Account Manager")
         title_font = QFont()
         title_font.setPointSize(18)
         title_font.setBold(True)
@@ -1415,6 +1682,7 @@ class RobloxManagerGUI(QMainWindow):
         self.setup_processes_tab()
         self.setup_logs_tab()
         self.setup_settings_tab()
+        self.setup_RAMEXPORT_tab()
         self.setup_credits_tab()
 
         self.setup_menu_bar()
@@ -1515,10 +1783,13 @@ class RobloxManagerGUI(QMainWindow):
         layout = QVBoxLayout(users_widget)
 
         self.users_table = QTableWidget()
-        self.users_table.setColumnCount(9)
+        self.users_table.setColumnCount(10)      # was 9
         self.users_table.setHorizontalHeaderLabels([
-            "User ID", "Username", "Private Server", "Place", "Status", "PIDs", "Last Active", "Inactive Duration", "Actions"
-        ])
+            "User ID","Username","Private Server","Place",
+            "Status","PIDs","TTL(s)","Last Active",
+            "Inactive For","Actions"
+])
+
 
         header = self.users_table.horizontalHeader()
         header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
@@ -1535,7 +1806,7 @@ class RobloxManagerGUI(QMainWindow):
         self.users_table.setColumnWidth(3, 100)  
         self.users_table.setColumnWidth(6, 100)  
         self.users_table.setColumnWidth(8, 160)  
-
+        self.users_table.setColumnWidth(9, 170)
         self.users_table.verticalHeader().setDefaultSectionSize(60)
 
         layout.addWidget(self.users_table)
@@ -1546,7 +1817,7 @@ class RobloxManagerGUI(QMainWindow):
         refresh_users_btn.clicked.connect(self.refresh_users)
         controls_layout.addWidget(refresh_users_btn)
 
-        add_user_btn = QPushButton("Add User")
+        add_user_btn = QPushButton("Modify Users")
         add_user_btn.clicked.connect(self.open_user_management)
         controls_layout.addWidget(add_user_btn)
 
@@ -1618,6 +1889,10 @@ class RobloxManagerGUI(QMainWindow):
 
         controls_layout.addStretch()
 
+        self.scan_trace_chk = QCheckBox("Show SCAN-TRACE messages", self)
+        self.scan_trace_chk.setChecked(False)      # default = ON
+        controls_layout.addWidget(self.scan_trace_chk)
+        
         self.auto_scroll_checkbox = QCheckBox("Auto-scroll")
         self.auto_scroll_checkbox.setChecked(True)
         controls_layout.addWidget(self.auto_scroll_checkbox)
@@ -1649,16 +1924,53 @@ class RobloxManagerGUI(QMainWindow):
 
         timing_group = QGroupBox("Timing Settings")
         timing_layout = QFormLayout(timing_group)
+        
+        timeout_group = QGroupBox("Shutdown Settings")
+        timeout_layout = QFormLayout(timeout_group)
+
+        self.settings_strap_threshold_input = QSpinBox()
+        self.settings_strap_threshold_input.setRange(1, 200)
+        self.settings_strap_threshold_input.setToolTip("Max number of strap.exe helpers before trimming")
+        timeout_layout.addRow("-Strap Limit:", self.settings_strap_threshold_input)
+        
+        self.kill_timeout_input = QSpinBox()
+        self.kill_timeout_input.setRange(60, 7200)
+        self.kill_timeout_input.setSuffix(" s")
+        self.kill_timeout_input.setToolTip("Time until window auto-closes (≤ 1,740s recommended)")
+        timeout_layout.addRow("Kill After:", self.kill_timeout_input)
+
+        self.poll_interval_input = QSpinBox()
+        self.poll_interval_input.setRange(1, 120)
+        self.poll_interval_input.setSuffix(" s")
+        self.poll_interval_input.setToolTip("Polling Interval + Kill After must stay under 1,800s")
+        timeout_layout.addRow("Poll Interval:", self.poll_interval_input)
+
+        self.webhook_input = QLineEdit()
+        self.webhook_input.setPlaceholderText("Discord webhook URL")
+        self.webhook_input.setToolTip("Keep empty to disable")
+        timeout_layout.addRow("Webhook URL:", self.webhook_input)
+
+        self.ping_msg_input = QLineEdit()
+        self.ping_msg_input.setPlaceholderText("Ping message (optional)")
+        timeout_layout.addRow("Ping Message:", self.ping_msg_input)
+
+        content_layout.addWidget(timeout_group)
 
         self.settings_offline_threshold_input = QSpinBox()
-        self.settings_offline_threshold_input.setRange(15, 120)
-        self.settings_offline_threshold_input.setSuffix(" seconds")
+        self.settings_offline_threshold_input.setRange(10, 120)
+        self.settings_offline_threshold_input.setSuffix(" s")
         self.settings_offline_threshold_input.setToolTip("How long to wait before restarting inactive users")
         timing_layout.addRow("Restart Inactive After:", self.settings_offline_threshold_input)
+        
+        self.settings_initial_delay_input = QSpinBox()
+        self.settings_initial_delay_input.setRange(5, 60)
+        self.settings_initial_delay_input.setSuffix(" s")
+        self.settings_initial_delay_input.setToolTip("Seconds between first-run launches when staggering is ON")
+        timing_layout.addRow("Initial Launch Delay:", self.settings_initial_delay_input)
 
         self.settings_launch_delay_input = QSpinBox()
-        self.settings_launch_delay_input.setRange(2, 15)
-        self.settings_launch_delay_input.setSuffix(" seconds")
+        self.settings_launch_delay_input.setRange(1, 120)
+        self.settings_launch_delay_input.setSuffix(" s")
         self.settings_launch_delay_input.setToolTip("Delay between launching sessions")
         timing_layout.addRow("Launch Delay:", self.settings_launch_delay_input)
 
@@ -1674,6 +1986,10 @@ class RobloxManagerGUI(QMainWindow):
         reset_settings_btn = QPushButton("Reset to Defaults")
         reset_settings_btn.clicked.connect(self.reset_settings)
         buttons_layout.addWidget(reset_settings_btn)
+        
+        clear_bad_btn = QPushButton("Clear Bad Flags")
+        clear_bad_btn.clicked.connect(self._clear_bad_flags)
+        buttons_layout.addWidget(clear_bad_btn)
 
         buttons_layout.addStretch()
 
@@ -1686,6 +2002,111 @@ class RobloxManagerGUI(QMainWindow):
         self.tab_widget.addTab(settings_widget, "Settings")
 
         self.load_settings_tab()
+        
+    def setup_RAMEXPORT_tab(self):
+        tab = QWidget()
+        layout = QVBoxLayout(tab)
+
+        # ── API parameters ─────────────────────────────────────────
+        form = QFormLayout()
+
+        self.ram_port_input  = QLineEdit("7963")
+        form.addRow("RAM Port:", self.ram_port_input)
+
+        self.ram_group_input = QLineEdit()
+        form.addRow("Group (Blank = All):", self.ram_group_input)
+
+        self.ram_pwd_input   = QLineEdit()
+        self.ram_pwd_input.setEchoMode(QLineEdit.EchoMode.Password)
+        form.addRow("Password:", self.ram_pwd_input)
+
+        layout.addLayout(form)
+
+        # ── merge / replace toggles ───────────────────────────────
+        self.merge_chk = QCheckBox("Merge with existing users.json (otherwise replace)")
+        self.merge_chk.setChecked(True)
+        layout.addWidget(self.merge_chk)
+
+        self.replace_cookie_chk = QCheckBox("Overwrite existing cookies")
+        self.replace_ps_chk     = QCheckBox("Overwrite existing private-servers")
+
+        def _merge_toggled(checked: bool):          # checked is True / False
+            self.replace_cookie_chk.setEnabled(checked)
+            self.replace_ps_chk.setEnabled(checked)
+
+        self.merge_chk.toggled.connect(_merge_toggled)   # use toggled(bool)
+        _merge_toggled(self.merge_chk.isChecked())       # set initial state
+
+        layout.addWidget(self.replace_cookie_chk)
+        layout.addWidget(self.replace_ps_chk)
+
+        # ── run button ─────────────────────────────────────────────
+        run_btn = QPushButton("Fetch && Apply Accounts")
+        run_btn.setProperty("class", "success")
+        run_btn.clicked.connect(self.execute_ram_import)
+        layout.addWidget(run_btn)
+
+        layout.addStretch()
+        self.tab_widget.addTab(tab, "RAM Export")
+        
+    @staticmethod
+    def _make_dev_card(name: str,
+                    movie_bytes: bytes,
+                    fallback: str = "GIF\nError") -> QWidget:
+        card   = QWidget()
+        layout = QVBoxLayout(card)
+        layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        layout.setSpacing(15)
+
+        ring_px = 6                         # ← any thickness you want
+
+        outer = QWidget()
+        outer.setFixedSize(120, 120)
+
+        # -------- coloured ring (layer 1) --------
+        ring = BorderRing(120, ring_px, ModernStyle.PRIMARY, parent=outer)
+        ring.move(0, 0)
+
+        # -------- masked GIF holder (layer 0) ----
+        inner_d = 120 - ring_px * 2         # 120 − 6*2 = 108 px
+        holder  = RoundMovieLabel(inner_d, 0, "transparent", parent=outer)
+        holder.setFixedSize(inner_d, inner_d)
+        holder.move(ring_px, ring_px)       # gap = ring thickness
+        
+        try:
+            buf = QBuffer()
+            buf.setData(QByteArray(movie_bytes))
+            buf.open(QIODevice.OpenModeFlag.ReadOnly)
+
+            mv = QMovie()
+            mv.setDevice(buf)
+            mv.setCacheMode(QMovie.CacheMode.CacheAll)
+            mv.setScaledSize(QSize(150, False))      # == holder size
+
+            buf.setParent(mv)
+            mv.setParent(holder)
+            holder.setMovie(mv)
+            mv.start()
+
+        except Exception:
+            holder.setText(fallback)
+            holder.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            holder.setStyleSheet(
+                f"color:{ModernStyle.TEXT_SECONDARY};"
+                f"border:1px dashed {ModernStyle.PRIMARY};"
+            )
+
+        layout.addWidget(outer)
+
+        # name label
+        lbl = QLabel(name)
+        f   = QFont(); f.setPointSize(16); f.setBold(True)
+        lbl.setFont(f)
+        lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        lbl.setStyleSheet(f"color:{ModernStyle.SECONDARY}")
+        layout.addWidget(lbl)
+
+        return card
 
     def setup_credits_tab(self):
         credits_widget = QWidget()
@@ -1709,84 +2130,27 @@ class RobloxManagerGUI(QMainWindow):
         content_layout.addWidget(title_label)
 
         developer_group = QGroupBox("Developer")
-        developer_layout = QVBoxLayout(developer_group)
+
+        # ── Two dev cards, side-by-side ──────────────────────────────
+        developer_layout = QHBoxLayout(developer_group)
         developer_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        developer_layout.setSpacing(40)
 
-        dev_container = QWidget()
-        dev_container_layout = QVBoxLayout(dev_container)
-        dev_container_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        dev_container_layout.setSpacing(15)
-
-        pfp_label = QLabel()
-        pfp_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        pfp_label.setFixedSize(120, 120)
-        pfp_label.setStyleSheet(f"""
-            QLabel {{
-                border: 3px solid {ModernStyle.PRIMARY};
-                border-radius: 60px;
-                background-color: {ModernStyle.SURFACE};
-            }}
-        """)
-
+        # — Jirach1 —
         try:
-            import urllib.request
-            pfp_url = "https://raw.githubusercontent.com/cresqnt-sys/MultiScope/refs/heads/main/cresqnt.png"
+            bytes_j = Path(__file__).with_name("jirachi.gif").read_bytes()
+        except FileNotFoundError:
+            bytes_j = urlopen("https://kyl.neocities.org/jirachi.gif").read()
 
-            with urllib.request.urlopen(pfp_url) as response:
-                image_data = response.read()
+        developer_layout.addWidget(self._make_dev_card("Jirach1", bytes_j))
 
-            pixmap = QPixmap()
-            pixmap.loadFromData(image_data)
+        # — cresqnt —
+        try:
+            bytes_c = Path(__file__).with_name("cresqnt.gif").read_bytes()
+        except FileNotFoundError:
+            bytes_c = urlopen("https://media1.tenor.com/m/CNBGgG2DU10AAAAd/nyan-cat-poptart.gif").read()
 
-            if not pixmap.isNull():
-                scaled_pixmap = pixmap.scaled(114, 114, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation)
-
-                rounded_pixmap = QPixmap(114, 114)
-                rounded_pixmap.fill(Qt.GlobalColor.transparent)
-
-                painter = QPainter(rounded_pixmap)
-                painter.setRenderHint(QPainter.RenderHint.Antialiasing)
-                painter.setBrush(QColor(0, 0, 0))
-                painter.setPen(Qt.PenStyle.NoPen)
-                painter.drawEllipse(0, 0, 114, 114)
-                painter.setCompositionMode(QPainter.CompositionMode.CompositionMode_SourceIn)
-                painter.drawPixmap(0, 0, scaled_pixmap)
-                painter.end()
-
-                pfp_label.setPixmap(rounded_pixmap)
-            else:
-                pfp_label.setText("No Image")
-                pfp_label.setStyleSheet(f"""
-                    QLabel {{
-                        border: 3px solid {ModernStyle.PRIMARY};
-                        border-radius: 60px;
-                        background-color: {ModernStyle.SURFACE};
-                        color: {ModernStyle.TEXT_SECONDARY};
-                    }}
-                """)
-        except Exception:
-            pfp_label.setText("Error\nLoading\nImage")
-            pfp_label.setStyleSheet(f"""
-                QLabel {{
-                    border: 3px solid {ModernStyle.PRIMARY};
-                    border-radius: 60px;
-                    background-color: {ModernStyle.SURFACE};
-                    color: {ModernStyle.TEXT_SECONDARY};
-                }}
-            """)
-
-        dev_container_layout.addWidget(pfp_label)
-
-        dev_label = QLabel("cresqnt")
-        dev_font = QFont()
-        dev_font.setPointSize(16)
-        dev_font.setBold(True)
-        dev_label.setFont(dev_font)
-        dev_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        dev_label.setStyleSheet(f"color: {ModernStyle.SECONDARY}; margin: 0;")
-        dev_container_layout.addWidget(dev_label)
-
-        developer_layout.addWidget(dev_container)
+        developer_layout.addWidget(self._make_dev_card("cresqnt",  bytes_c))
 
         content_layout.addWidget(developer_group)
 
@@ -1815,8 +2179,35 @@ class RobloxManagerGUI(QMainWindow):
         discord_btn.clicked.connect(lambda: self.open_url("https://discord.gg/6cuCu6ymkX"))
         support_layout.addWidget(discord_btn)
 
-        content_layout.addWidget(support_group)
+        content_layout.addWidget(support_group) 
+#---------------------------------------------------------------------------------------------------
+        support_group2 = QGroupBox("Additional") #lazy copy and paste...
+        support_layout2 = QVBoxLayout(support_group2)
 
+        support_label2 = QLabel("The Best Glitch Hunt Server:")
+        support_label2.setStyleSheet(f"color: {ModernStyle.TEXT_PRIMARY}; font-weight: bold; margin-bottom: 5px;")
+        support_layout2.addWidget(support_label2)
+
+        discord_btn2 = QPushButton("https://discord.gg/YPvhKFTjEF")
+        discord_btn2.setStyleSheet(f"""
+            QPushButton {{
+                background-color: 
+                color: white;
+                border: none;
+                padding: 12px 20px;
+                border-radius: 6px;
+                font-weight: bold;
+                text-align: left;
+            }}
+            QPushButton:hover {{
+                background-color: 
+            }}
+        """)
+        discord_btn2.clicked.connect(lambda: self.open_url("https://discord.gg/YPvhKFTjEF"))
+        support_layout2.addWidget(discord_btn2)
+
+        content_layout.addWidget(support_group2)
+        
         license_group = QGroupBox("License | Legal")
         license_layout = QVBoxLayout(license_group)
 
@@ -1836,6 +2227,79 @@ class RobloxManagerGUI(QMainWindow):
         layout.addWidget(scroll_area)
 
         self.tab_widget.addTab(credits_widget, "Credits")
+        
+    def execute_ram_import(self):
+        base_url = f"http://127.0.0.1:{self.ram_port_input.text().strip() or '7963'}"
+        params   = {
+            "Password"      : self.ram_pwd_input.text().strip(),
+            "IncludeCookies": "true"
+        }
+        group_val = self.ram_group_input.text().strip()
+        if group_val:
+            params["Group"] = group_val
+
+        try:
+            r = requests.get(f"{base_url}/GetAccountsJson", params=params, timeout=15)
+            if r.status_code == 200:
+                accounts_raw = r.json()
+            elif r.status_code == 400:
+                raise RuntimeError("400 Bad Request – “Allow external connections” is OFF in Roblox Account Manager.")
+            elif r.status_code == 401:
+                raise RuntimeError("401 Unauthorized – Wrong Password")
+            elif r.status_code == 404:
+                raise RuntimeError("404 Not Found – RAM endpoint missing on this port.")#
+            elif r.status_code == 500:
+                raise RuntimeError("500 Server Error – RAM threw an internal error.")
+            else:
+                raise RuntimeError(f"{r.status_code} {r.reason} – RAM API request failed.")
+
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as net_err:
+            QMessageBox.critical(
+                self,
+                "Port / Connection Error",
+                f"Could not reach Roblox Account Manager at port {self.ram_port_input.text()}\n"
+                "• Is Roblox Account Manager open?\n"
+                "• Is the port correct?\n"
+                "*NOTE: Roblox Account Manager must be restarted whenever you change the port.\n\n"
+            )
+            return
+
+        except Exception as e:
+            QMessageBox.critical(self, "Import Error", str(e))
+            return
+
+
+        new_users = transform(accounts_raw)        # -> JARAM user-dict
+        if not new_users:
+            QMessageBox.warning(self, "No Accounts", "RAM returned 0 usable accounts.")
+            return
+
+        # --- backup BEFORE touching users.json --------------------
+        self.config_manager._create_backup(self.config_manager.users_file)
+
+        if not self.merge_chk.isChecked():
+            merged = new_users                       # full replace
+        else:
+            merged = self.config_manager.load_users()
+            for uid, info in new_users.items():
+                if uid not in merged:
+                    merged[uid] = info
+                else:                                # existing user
+                    if self.replace_cookie_chk.isChecked():
+                        merged[uid]["cookie"] = info.get("cookie", "")
+                        merged[uid]["bad"] = False
+                    if self.replace_ps_chk.isChecked():
+                        merged[uid]["private_server_link"] = info.get("private_server_link", "")
+                        merged[uid]["place"]               = info.get("place", "")
+
+        if self.config_manager.save_users(merged):
+            QMessageBox.information(self, "Success",
+                f"Imported {len(new_users)} accounts.\n"
+                f"Total users.json entries: {len(merged)}")
+            self.add_log("RAM import complete — users.json updated.")
+        else:
+            QMessageBox.critical(self, "Save Error", "Failed to write users.json!")
+
 
     def open_url(self, url):
         import webbrowser
@@ -1868,7 +2332,7 @@ class RobloxManagerGUI(QMainWindow):
             QMessageBox.critical(self, "Config Error", f"Error reading user configuration: {e}")
             return
 
-        self.worker_thread = WorkerThread()
+        self.worker_thread = WorkerThread(self.config_manager)
         self.worker_thread.log_signal.connect(self.add_log)
         self.worker_thread.status_signal.connect(self.update_user_status)
         self.worker_thread.process_signal.connect(self.update_process_data)
@@ -1903,12 +2367,13 @@ class RobloxManagerGUI(QMainWindow):
 
     def update_ui(self):
 
-        total_users = len(self.user_data)
         active_users = sum(1 for data in self.user_data.values() if data.get('status') == 'Active')
         total_processes = sum(len(data.get('pids', [])) for data in self.user_data.values())
         pending_restarts = sum(1 for data in self.user_data.values() if data.get('needs_restart', False))
+        users_cfg = self.config_manager.load_users()
+        good = [u for u, i in users_cfg.items() if not i.get("bad")]
 
-        self.total_users_label.setText(str(total_users))
+        self.total_users_label.setText(f"{len(good)}")
         self.active_users_label.setText(str(active_users))
         self.total_processes_label.setText(str(total_processes))
         self.pending_restarts_label.setText(str(pending_restarts))
@@ -1924,63 +2389,71 @@ class RobloxManagerGUI(QMainWindow):
     def refresh_users(self):
         self.users_table.setRowCount(len(self.user_data))
 
-        users_config = self.config_manager.load_users()
+        users_cfg = self.config_manager.load_users()
 
-        for row, (user_id, data) in enumerate(self.user_data.items()):
+        # good first, bad last
+        ordered = sorted(
+            self.user_data.items(),
+            key=lambda kv: bool(users_cfg.get(kv[0], {}).get("bad", False))
+        )
+
+        for row, (user_id, runtime) in enumerate(ordered):
+            u_conf   = users_cfg.get(user_id, {})
+            bad_flag = bool(u_conf.get("bad", False))
+
+            # ── static columns ───────────────────────────────────────
+            username  = u_conf.get("username", f"User_{user_id}")
+            ps_link   = u_conf.get("private_server_link", "")
+            place     = u_conf.get("place", "")
 
             self.users_table.setItem(row, 0, QTableWidgetItem(user_id))
-
-            user_info = users_config.get(user_id, {})
-            if isinstance(user_info, dict):
-                username = user_info.get("username", f"User_{user_id}")
-                private_server_link = user_info.get("private_server_link", "")
-                place = user_info.get("place", "")
-            else:
-                username = f"User_{user_id}"
-                private_server_link = ""
-                place = ""
-
             self.users_table.setItem(row, 1, QTableWidgetItem(username))
 
-            display_private_server = private_server_link[:25] + "..." if len(private_server_link) > 25 else private_server_link
-            self.users_table.setItem(row, 2, QTableWidgetItem(display_private_server))
-
+            trimmed_link = ps_link[:25] + "..." if len(ps_link) > 25 else ps_link
+            self.users_table.setItem(row, 2, QTableWidgetItem(trimmed_link))
             self.users_table.setItem(row, 3, QTableWidgetItem(place))
 
-            status_item = QTableWidgetItem(data.get('status', 'Unknown'))
-            if 'Active' in data.get('status', ''):
-                status_item.setForeground(QColor(ModernStyle.SECONDARY))
-            elif 'Inactive' in data.get('status', ''):
-                status_item.setForeground(QColor(ModernStyle.WARNING))
-            elif 'Restarting' in data.get('status', ''):
-                status_item.setForeground(QColor(ModernStyle.PRIMARY))
+            # ── status cell ──────────────────────────────────────────
+            if bad_flag:
+                status_text, colour = "Bad", QColor(ModernStyle.ERROR)
             else:
-                status_item.setForeground(QColor(ModernStyle.ERROR))
+                raw = runtime.get("status", "Unknown")
+                if "Active" in raw:
+                    colour = QColor(ModernStyle.SECONDARY)
+                elif "Inactive" in raw:
+                    colour = QColor(ModernStyle.WARNING)
+                elif "Restarting" in raw:
+                    colour = QColor(ModernStyle.PRIMARY)
+                else:
+                    colour = QColor(ModernStyle.ERROR)
+                status_text = raw
+
+            status_item = QTableWidgetItem(status_text)
+            status_item.setForeground(colour)
             self.users_table.setItem(row, 4, status_item)
 
-            pids = data.get('pids', [])
-            pids_text = ', '.join(map(str, pids)) if pids else 'None'
-            self.users_table.setItem(row, 5, QTableWidgetItem(pids_text))
+            # ── runtime columns ─────────────────────────────────────
+            pids = runtime.get('pids', [])
+            self.users_table.setItem(row, 5,
+                                    QTableWidgetItem(', '.join(map(str, pids)) or 'None'))
 
-            last_active = data.get('last_active', 0)
-            if last_active > 0:
-                last_active_str = datetime.fromtimestamp(last_active).strftime("%H:%M:%S")
-            else:
-                last_active_str = "Never"
-            self.users_table.setItem(row, 6, QTableWidgetItem(last_active_str))
+            ttl_list = runtime.get('ttl', [])
+            self.users_table.setItem(row, 6,
+                                    QTableWidgetItem(', '.join(f"{t}s" for t in ttl_list) or 'N/A'))
 
-            inactive_since = data.get('inactive_since')
-            if inactive_since:
-                duration = int(time.time() - inactive_since)
-                duration_str = f"{duration}s"
-            else:
-                duration_str = "N/A"
-            self.users_table.setItem(row, 7, QTableWidgetItem(duration_str))
+            last_active = runtime.get('last_active', 0)
+            last_active_str = datetime.fromtimestamp(last_active).strftime("%H:%M:%S") if last_active else "Never"
+            self.users_table.setItem(row, 7, QTableWidgetItem(last_active_str))
 
-            actions_widget = QWidget()
-            actions_layout = QHBoxLayout(actions_widget)
+            inactive_since = runtime.get('inactive_since')
+            dur = int(time.time() - inactive_since) if inactive_since else None
+            self.users_table.setItem(row, 8, QTableWidgetItem(f"{dur}s" if dur else "N/A"))
+
+            # ── action buttons ──────────────────────────────────────
+            actions_widget  = QWidget()
+            actions_layout  = QHBoxLayout(actions_widget)
             actions_layout.setContentsMargins(8, 5, 8, 5)
-            actions_layout.setSpacing(12)  
+            actions_layout.setSpacing(12)
 
             restart_btn = QPushButton("Restart")
             restart_btn.setStyleSheet(f"""
@@ -1992,16 +2465,16 @@ class RobloxManagerGUI(QMainWindow):
                     border-radius: 4px;
                     font-weight: 500;
                     font-size: 11px;
-                    min-width: 50px;
-                    max-width: 60px;
+                    min-width: 40px;
+                    max-width: 50px;
                     min-height: 26px;
                     max-height: 28px;
                 }}
                 QPushButton:hover {{
-                    background-color: {ModernStyle.PRIMARY_VARIANT};
+                    background-color: {ModernStyle.ERROR};
                 }}
             """)
-            restart_btn.clicked.connect(lambda checked, uid=user_id: self.restart_user_session(uid))
+            restart_btn.clicked.connect(lambda _, uid=user_id: self.restart_user_session(uid))
             actions_layout.addWidget(restart_btn)
 
             kill_btn = QPushButton("Kill")
@@ -2020,13 +2493,14 @@ class RobloxManagerGUI(QMainWindow):
                     max-height: 28px;
                 }}
                 QPushButton:hover {{
-                    background-color: 
+                    background-color: {ModernStyle.ERROR};
                 }}
             """)
-            kill_btn.clicked.connect(lambda checked, uid=user_id: self.kill_user_processes(uid))
+            kill_btn.clicked.connect(lambda _, uid=user_id: self.kill_user_processes(uid))
             actions_layout.addWidget(kill_btn)
 
-            self.users_table.setCellWidget(row, 8, actions_widget)
+            self.users_table.setCellWidget(row, 9, actions_widget)
+
 
     def refresh_processes(self):
         self.processes_table.setRowCount(len(self.process_data))
@@ -2071,6 +2545,9 @@ class RobloxManagerGUI(QMainWindow):
             self.processes_table.setCellWidget(row, 4, actions_widget)
 
     def add_log(self, message):
+        if message.startswith("[SCAN-TRACE]") and not self.scan_trace_chk.isChecked():
+            return    
+        print("add_log():", message)
         timestamp = datetime.now().strftime("%H:%M:%S")
         formatted_message = f"[{timestamp}] {message}"
 
@@ -2109,38 +2586,92 @@ class RobloxManagerGUI(QMainWindow):
         self.tab_widget.setCurrentIndex(4)
 
     def load_settings_tab(self):
-        settings = self.config_manager.load_settings()
+        cfg = self.config_manager.load_settings()
 
-        self.settings_window_limit_input.setValue(settings.get("window_limit", 1))
+        self.settings_window_limit_input.setValue(cfg.get("window_limit", 1))
 
-        timeouts = settings.get("timeouts", {})
-        self.settings_offline_threshold_input.setValue(timeouts.get("offline", 35))
-        self.settings_launch_delay_input.setValue(timeouts.get("launch_delay", 4))
+        self.settings_initial_delay_input.setValue(
+                cfg.get("timeouts", {}).get("initial_delay", 4))
+
+        self.settings_offline_threshold_input.setValue(
+                cfg.get("timeouts", {}).get("offline", 35))
+
+        self.settings_launch_delay_input.setValue(
+                cfg.get("timeouts", {}).get("launch_delay", 4))
+        
+        self.settings_strap_threshold_input.setValue(
+                cfg.get("timeouts", {}).get("strap_threshold", 50))
+
+        tm = cfg.get("timeout_monitor", {})
+        self.kill_timeout_input.setValue(tm.get("kill_timeout", 1740))
+        self.poll_interval_input.setValue(tm.get("poll_interval", 10))
+        self.webhook_input.setText(tm.get("webhook_url", ""))
+        self.ping_msg_input.setText(tm.get("ping_message", "<@YourPing> This message is sent whenever your active processes drop to 1 or 0, for debugging, leave webhook empty if not interested"))
 
     def save_settings(self):
         settings = {
             "window_limit": self.settings_window_limit_input.value(),
             "timeouts": {
-                "offline": self.settings_offline_threshold_input.value(),
-                "launch_delay": self.settings_launch_delay_input.value()
+                "initial_delay": self.settings_initial_delay_input.value(),
+                "offline"      : self.settings_offline_threshold_input.value(),
+                "launch_delay" : self.settings_launch_delay_input.value(),
+                "strap_threshold": self.settings_strap_threshold_input.value(),
+
+            },
+            "timeout_monitor": {                              # NEW block
+            "kill_timeout" : self.kill_timeout_input.value(),
+            "poll_interval": self.poll_interval_input.value(),
+            "webhook_url"  : self.webhook_input.text().strip(),
+            "ping_message" : self.ping_msg_input.text().strip() or "<@YourPing> This message is sent whenever your active processes drop to 1 or 0, for debugging. Leave webhook empty if not interested"
             }
         }
 
         if self.config_manager.save_settings(settings):
-            QMessageBox.information(self, "Success", "Settings saved successfully!")
-
+            if self.worker_thread and self.worker_thread.isRunning():
+                self.worker_thread.apply_new_settings(settings)
+            QMessageBox.information(self, "Success", "Settings saved and applied!")
         else:
-            QMessageBox.critical(self, "Error", "Failed to save settings. Please check the logs for details.")
+            QMessageBox.critical(self, "Error", "Failed to save settings.")
+
+
 
     def reset_settings(self):
-        reply = QMessageBox.question(self, "Reset Settings",
-                                   "Are you sure you want to reset all settings to defaults?",
-                                   QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-        if reply == QMessageBox.StandardButton.Yes:
-            self.settings_window_limit_input.setValue(1)
-            self.settings_offline_threshold_input.setValue(35)
-            self.settings_launch_delay_input.setValue(4)
-            QMessageBox.information(self, "Reset Complete", "Settings have been reset to defaults. Click 'Save Settings' to apply.")
+        """Load the hard-coded defaults from ConfigManager into the UI."""
+        defaults = self.config_manager.default_settings          # ← one source of truth
+        t        = defaults["timeouts"]                          # short alias
+
+        # ── basic limits ──────────────────────────────────────────
+        self.settings_window_limit_input.setValue(defaults["window_limit"])
+
+        # ── launch / restart timings ──────────────────────────────
+        self.settings_initial_delay_input.setValue(t["initial_delay"])
+        self.settings_launch_delay_input.setValue(t["launch_delay"])
+        self.settings_offline_threshold_input.setValue(t["offline"])
+
+        # ── helper / strap limiter ────────────────────────────────
+        self.settings_strap_threshold_input.setValue(t["strap_threshold"])
+
+        # ── timeout-monitor block (kill / poll / webhook) ─────────
+        self.kill_timeout_input.setValue(t["kill_timeout"])
+        self.poll_interval_input.setValue(t["poll_interval"])
+        self.webhook_input.setText(t["webhook_url"])
+        self.ping_msg_input.setText(t["ping_message"])
+
+        QMessageBox.information(
+            self,
+            "Reset Complete",
+            "All settings have been restored to their default values.\n"
+            "Click “Save Settings” to confirm them."
+        )
+
+    def _clear_bad_flags(self):
+        users = self.config_manager.load_users()
+        for info in users.values():
+            info["bad"] = False
+        self.config_manager.save_users(users)
+        QMessageBox.information(self, "Done", "All bad-cookie marks cleared.")
+        self.refresh_users()                # live update
+        self.load_settings_tab()            # if you show counts here
 
     def show_config_location(self):
         config_info = self.config_manager.get_config_info()
@@ -2171,10 +2702,11 @@ class RobloxManagerGUI(QMainWindow):
     def show_about(self):
         config_info = self.config_manager.get_config_info()
         QMessageBox.about(self, "About JARAM",
-                         "JARAM (Just Another Roblox Account Manager) v1.0\n\n"
+                         "JARAM X Jirach1(Just Another Roblox Account Manager) v1.1\n\n"
                          "Advanced multi-account Roblox session manager\n"
                          "with automated presence monitoring and process management.\n\n"
                          "Built with PyQt6 and modern design principles.\n\n"
+                         "Jirach1 was here.\n\n"
                          f"Configuration stored in:\n{config_info['config_dir']}")
 
     def restart_all_sessions(self):
@@ -2186,9 +2718,20 @@ class RobloxManagerGUI(QMainWindow):
                                    "Are you sure you want to restart all sessions?",
                                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         if reply == QMessageBox.StandardButton.Yes:
-            for user_id in self.user_data.keys():
-                self.worker_thread.restart_user_session(user_id)
+            restartables = [
+                user_id
+                for user_id, state in self.worker_thread.user_states.items()
+                if not state["user_info"].get("bad", False)
+            ]
 
+            def delayed_restart():
+                for i, user_id in enumerate(restartables):
+                    delay = i * self.worker_thread.launcher.launch_delay
+                    QTimer.singleShot(delay * 1000, lambda uid=user_id: self.worker_thread.restart_user_session(uid))
+
+            self.add_log(f"Queued restart for {len(restartables)} sessions using delay={self.worker_thread.launcher.launch_delay}s")
+            delayed_restart()
+            
     def kill_all_processes(self):
         if not self.worker_thread or not self.worker_thread.isRunning():
             QMessageBox.warning(self, "Manager Not Running", "Please start the manager first.")
@@ -2259,12 +2802,13 @@ class RobloxManagerGUI(QMainWindow):
                 event.ignore()
         else:
             event.accept()
+            
 
 def main():
     app = QApplication(sys.argv)
 
     app.setApplicationName("JARAM")
-    app.setApplicationVersion("1.0")
+    app.setApplicationVersion("1.1")
     app.setOrganizationName("cresqnt")
 
     icon_path = _get_icon_path()
