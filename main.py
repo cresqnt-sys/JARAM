@@ -14,44 +14,6 @@ try:
     from gui import ConfigManager
 except ImportError:
 
-
-    
-    def limit_strap_helpers(threshold: int = 50, *, kill_all: bool = False) -> None:
-        """
-        Trim *-strap.exe* helpers.
-
-        • kill_all = False  ➜ keep the **oldest** helper and terminate any
-        extras once the running count reaches or exceeds *threshold*.
-        • kill_all = True   ➜ terminate **every** helper.
-
-        Pass threshold=1 to “kill all but oldest” unconditionally.
-        """
-        helpers = [
-            p for p in psutil.process_iter(['name', 'create_time'])
-            if (n := p.info['name']) and n.lower().endswith('strap.exe')
-        ]
-        if not helpers:
-            return
-
-        if kill_all:
-            for p in helpers:
-                try:
-                    p.kill()
-                except Exception:
-                    pass
-            return
-
-        if len(helpers) < threshold:
-            return                                    # nothing to trim
-
-        helpers.sort(key=lambda p: p.info['create_time'])  # oldest first
-        for p in helpers[1:]:                         # keep index-0
-            try:
-                p.kill()
-            except Exception:
-                pass
-
-
     class ConfigManager:
         def __init__(self):
             self.app_name = "JARAM"
@@ -71,82 +33,69 @@ except ImportError:
                 self.config_dir.mkdir(parents=True, exist_ok=True)
             except Exception as e:
                 pass
-        # ── new ─────────────────────────────────────────────
-        def _deep_update(self, base: dict, updates: dict):
-            """Recursive dict.update so nested keys survive partial files."""
-            for k, v in updates.items():
-                if isinstance(v, dict) and isinstance(base.get(k), dict):
-                    base[k] = self._deep_update(base[k], v)
-                else:
-                    base[k] = v
-            return base
 
-        def load_settings(self):
+        def load_users(self):
             try:
-                if self.settings_file.exists():
-                    with open(self.settings_file, 'r', encoding='utf-8') as f:
-                        loaded = json.load(f)
+                if self.users_file.exists():
+                    with open(self.users_file, 'r', encoding='utf-8') as f:
+                        users_data = json.load(f)
 
-                    # start from defaults, then deep-merge file content
-                    settings = json.loads(json.dumps(self.default_settings))  # deep copy
-                    settings = self._deep_update(settings, loaded)
-                    return settings
+                        manager_format = {}
+                        for user_id, user_info in users_data.items():
+                            if isinstance(user_info, dict):
+                                manager_format[user_id] = user_info
+                            else:
+
+                                manager_format[user_id] = {
+                                    "username": f"User_{user_id}",
+                                    "cookie": user_info,
+                                    "private_server_link": "",
+                                    "place": ""
+                                }
+                        return manager_format
                 else:
-                    return json.loads(json.dumps(self.default_settings))
-            except Exception:
-                return json.loads(json.dumps(self.default_settings))
 
-# ──────────────────────────────────────────────────────────────
-# 1-A. RobloxManager – strip presence monitor & shorter loop
-# ──────────────────────────────────────────────────────────────
+                    old_config_path = Path("config.json")
+                    if old_config_path.exists():
+                        with open(old_config_path, 'r', encoding='utf-8') as f:
+                            return json.load(f)
+            except Exception as e:
+                pass
+            return {}
+
 class RobloxManager:
-    def __init__(self, config_manager: "ConfigManager" = None):
-        # use the GUI’s instance if one is provided
-        self.config_manager = config_manager or ConfigManager()
-        self.settings        = self._load_settings()
+    def __init__(self):
+        self.config_manager = ConfigManager()
+        self.settings = self._load_settings()
         self.process_tracker = ProcessTracker()
-        self.auth_handler    = AuthenticationHandler()
-
-        # ⬇ delete: self.presence_monitor = PresenceMonitor()
+        self.auth_handler = AuthenticationHandler()
+        self.presence_monitor = PresenceMonitor()
 
         app_settings = self._load_app_settings()
+
         self.target_place = "15532962292"
         self.window_limit = app_settings.get("window_limit", 1)
 
-        # presence key removed, default tick every 2 s
         self.check_intervals = {
-            'window'   : 3,
-            'cleanup'  : 30,
-            'main_tick': 2
+            'window': 3,
+            'presence': 1.5,
+            'cleanup': 30
         }
 
         timeouts = app_settings.get("timeouts", {})
-
         self.timeouts = {
-            "relaunch"     : 20,
-            "launch_delay" : timeouts.get("launch_delay", 4),
-            "offline"      : timeouts.get("offline",      35),
-            "initial_delay": timeouts.get("initial_delay",4)
+            'relaunch': 20,  
+            'offline': timeouts.get("offline", 35),
+            'launch_delay': timeouts.get("launch_delay", 4)
         }
 
-        self.excluded_pid = 0
-        from timeout_monitor import TimeoutMonitor   # top-level import
-
-        tm_cfg = app_settings.get("timeout_monitor", {})
-        self.timeout_monitor = TimeoutMonitor(
-            kill_timeout        = tm_cfg.get("kill_timeout", 1740),
-            poll_interval       = tm_cfg.get("poll_interval", 10),
-            webhook_url         = tm_cfg.get("webhook_url", ""),
-            ping_message        = tm_cfg.get("ping_message", "<@YourPing> This message is sent whenever your active processes drop to 1 or 0, for debugging, leave webhook empty if not interested")
-        )
-
+        self.excluded_pid = 0  
 
     def _load_settings(self):
         try:
 
             if hasattr(self.config_manager, 'get_users_for_manager'):
-                return self.config_manager.get_users_for_manager()   # keep ALL users
-
+                users = self.config_manager.get_users_for_manager()
             else:
                 users = self.config_manager.load_users()
 
@@ -238,10 +187,54 @@ class AuthenticationHandler:
             pass
         return None
 
-# ──────────────────────────────────────────────────────────────
-# 1-B. presence monitor class – delete the whole class
-#     (PresenceMonitor … end)
-# ──────────────────────────────────────────────────────────────
+class PresenceMonitor:
+    def __init__(self):
+        pass
+
+    def check_user_activity(self, user_id, cookie, auth_handler):
+        session = requests.Session()
+        session.cookies[".ROBLOSECURITY"] = cookie
+        session.headers.update({
+            "Referer": "https://www.roblox.com/",
+            "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/91.0.4472.124 Safari/537.36"
+        })
+
+        max_attempts = 3
+        for attempt in range(max_attempts):
+            try:
+                csrf_token = auth_handler.retrieve_csrf_token(cookie)
+                if not csrf_token:
+                    return None
+
+                session.headers["X-CSRF-TOKEN"] = csrf_token
+
+                response = session.post(
+                    "https://presence.roblox.com/v1/presence/users",
+                    json={"userIds": [user_id]},
+                    timeout=5
+                )
+
+                if response.status_code == 200:
+                    data = response.json()
+                    if data.get("userPresences"):
+                        presence = data["userPresences"][0]
+                        return presence.get("userPresenceType") == 2
+
+                elif response.status_code == 403:
+                    if cookie in auth_handler.token_cache:
+                        del auth_handler.token_cache[cookie]
+                    continue
+
+                elif response.status_code == 429:
+                    return None
+
+                else:
+                    return None
+
+            except Exception as error:
+                continue
+
+        return None
 
 class ProcessManager:
     def __init__(self, excluded_pid=0):
@@ -258,14 +251,9 @@ class ProcessManager:
         if pid:
             try:
                 process = psutil.Process(pid)
-                # (optional) protect the launcher itself
-                if pid == self.excluded_pid:
-                    return False
-                # primary method
-                rc = os.system(f"taskkill /F /PID {pid}")
-                if rc != 0:              # taskkill failed – try psutil
-                    process.kill()
-                # … tracker-cleanup exactly as before …
+                if process.name() == self.process_name and pid != self.excluded_pid:
+                    os.system(f"taskkill /F /PID {pid}")
+
                     if tracker and pid in tracker.process_owners:
                         user_id = tracker.process_owners[pid]
                         if pid in tracker.user_processes[user_id]:
@@ -384,26 +372,13 @@ class ProcessManager:
         return eliminated
 
 class GameLauncher:
-    def __init__(self,
-                 target_place,
-                 process_mgr,
-                 auth_handler,
-                 process_tracker,
-                 config_mgr,
-                 launch_delay=4,
-                 initial_delay=4):
-        # objects & settings we’ll need later
-        self.target_place     = target_place
-        self.process_manager  = process_mgr
-        self.auth_handler     = auth_handler
-        self.tracker          = process_tracker
-        self.cfg = config_mgr
-
-        # timing
-        self.launch_delay  = launch_delay        # normal relaunch cadence
-        self.initial_delay = initial_delay       # first-run staggering
-
-        self.process_timeout = 20   # seconds to wait for a new PID after os.startfile
+    def __init__(self, target_place, process_manager, auth_handler, tracker):
+        self.target_place = target_place
+        self.process_manager = process_manager
+        self.auth_handler = auth_handler
+        self.tracker = tracker
+        self.launch_delay = 4
+        self.process_timeout = 20
 
     def _extract_private_server_info(self, private_server_link, cookie=None):
         import re
@@ -514,12 +489,7 @@ class GameLauncher:
                 place_id, private_code = resolved_place_id, resolved_link_code
                 link_type = "resolved"
 
-        # ── preferred order ───────────────────────────────────────────
-        # 1. place ID parsed from the private-server link
-        # 2. explicit "place" value in users.json
-        # 3. manager-wide default  (self.target_place)
-        user_place_cfg = user_info.get("place") if isinstance(user_info, dict) else None
-        target_place = place_id or user_place_cfg or self.target_place
+        target_place = place_id if place_id else self.target_place
 
         if private_code:
 
@@ -539,10 +509,6 @@ class GameLauncher:
                 )
 
             else:
-                self.cfg.mark_bad_cookie(user_id, True)      # persist to file
-                if user_info is not None:                    # update live copy
-                    user_info["bad"] = True
-                    user_info["inactive_since"] = time.time()
                 return False
         else:
 
@@ -560,11 +526,8 @@ class GameLauncher:
                     f"+robloxLocale:en_us+gameLocale:en_us"
                 )
             else:
-                self.cfg.mark_bad_cookie(user_id, True)      # persist to file
-                if user_info is not None:                    # update live copy
-                    user_info["bad"] = True
-                    user_info["inactive_since"] = time.time()
                 return False
+
         try:
 
             if not skip_cleanup:
@@ -578,111 +541,121 @@ class GameLauncher:
 
             new_pid = self.process_manager.await_new_process(user_id, launch_timestamp, self.process_timeout, self.tracker)
             if new_pid:
-                if user_info and user_info.get("bad", False):
-                    self.cfg.mark_bad_cookie(user_id, False)     # ⬅ un-flag
-                    user_info["bad"] = False                   # clear RAM
                 return True
             else:
                 return False
         except Exception as error:
             return False
 
-    def initialize_all_sessions(self, user_configs: dict):
+    def initialize_all_sessions(self, user_configs):
         self.tracker.initialization_mode = True
+
         try:
-            for idx, (user_id, user_info) in enumerate(user_configs.items()):
-                if user_info.get("bad", False):
-                    continue     # flagged → skip
+            for index, (user_id, user_info) in enumerate(user_configs.items()):
                 cookie = user_info.get("cookie", "") if isinstance(user_info, dict) else user_info
 
-                # kill anything already running for that user
-                for pid in self.tracker.user_processes.get(user_id, []).copy():
-                    if self.process_manager.verify_process_active(pid):
-                        self.process_manager.terminate_process(pid, self.tracker)
+                existing_pids = self.tracker.user_processes.get(user_id, []).copy()
+                if existing_pids:
+                    for pid in existing_pids:
+                        if pid != self.process_manager.excluded_pid:
+                            self.process_manager.terminate_process(pid, self.tracker)
 
                 self.start_game_session(user_id, cookie, user_info, skip_cleanup=True)
 
-                # stagger every first-run launch except the last one
-                if idx < len(user_configs) - 1:
-                    time.sleep(self.initial_delay)
+                if index < len(user_configs) - 1:
+                    time.sleep(self.launch_delay)
+
         finally:
             self.tracker.initialization_mode = False
 
-
-# ──────────────────────────────────────────────────────────────
-# 1-C. execute_main_loop – new “process-only” heartbeat
-# ──────────────────────────────────────────────────────────────
 def execute_main_loop():
-    manager      = RobloxManager()
-    process_mgr  = ProcessManager(manager.excluded_pid)
-    launcher = GameLauncher(
-        manager.target_place,
-        process_mgr,
-        manager.auth_handler,
-        manager.process_tracker,
-        manager.config_manager,
-        launch_delay=manager.timeouts["launch_delay"],
-        initial_delay=manager.timeouts["initial_delay"]
-)
+    manager = RobloxManager()
+    process_mgr = ProcessManager(manager.excluded_pid)
+    launcher = GameLauncher(manager.target_place, process_mgr, manager.auth_handler, manager.process_tracker)
 
-
-    # track the last launch so we honour launch_delay
-    user_state = {
-        uid: {"last_launch": 0,
-              "user_info" : info}
-        for uid, info in manager.settings.items()
+    timing_trackers = {
+        'window_check': 0,
+        'relaunch': 0,
+        'cleanup': 0,
+        'orphan_check': 0
     }
 
-    # fire everything once on boot
+    user_states = {user_id: {
+        "last_active": 0,
+        "inactive_since": None,
+        "user_info": user_info,
+        "requires_restart": False
+    } for user_id, user_info in manager.settings.items()}
+
     launcher.initialize_all_sessions(manager.settings)
-    for uid in user_state:
-        user_state[uid]["last_launch"] = time.time()
 
-    # ───── main loop ─────
-    tickers = {'window': 0, 'cleanup': 0}
     while True:
-        now = time.time()
+        current_timestamp = time.time()
 
-        # housekeeping
-        if now - tickers['cleanup'] >= manager.check_intervals['cleanup']:
-            process_mgr.cleanup_dead_processes(manager.process_tracker)
-            process_mgr.eliminate_orphaned_processes(
-                manager.process_tracker, set(manager.settings.keys())
-            )
-            tickers['cleanup'] = now
+        try:
+            if current_timestamp - timing_trackers['cleanup'] >= manager.check_intervals['cleanup']:
+                process_mgr.cleanup_dead_processes(manager.process_tracker)
+                timing_trackers['cleanup'] = current_timestamp
 
-        if now - tickers['window'] >= manager.check_intervals['window']:
-            for pid, nwin in process_mgr.count_windows_by_process().items():
-                if nwin > manager.window_limit and pid != manager.excluded_pid:
-                    process_mgr.terminate_process(pid, manager.process_tracker)
-            tickers['window'] = now
+            if current_timestamp - timing_trackers['orphan_check'] >= (manager.check_intervals['cleanup'] * 2):
+                process_mgr.eliminate_orphaned_processes(manager.process_tracker, set(manager.settings.keys()))
+                timing_trackers['orphan_check'] = current_timestamp
 
-        # check each user – if **no live PID**, relaunch
-        for uid, st in user_state.items():
-                        # ── strap.exe limiter (only if nothing waiting to launch) ──
-            pending_restarts = any(
-                (not [pid for pid in manager.process_tracker.user_processes.get(uid, [])
-                    if process_mgr.verify_process_active(pid)])
-                for uid in user_state
-            )
-            if not pending_restarts:          # queue is empty
-                limit_strap_helpers(threshold=50)
+            if current_timestamp - timing_trackers['window_check'] >= manager.check_intervals['window']:
+                window_counts = process_mgr.count_windows_by_process()
 
-            live_pids = [pid for pid in manager.process_tracker.user_processes.get(uid, [])
-                         if process_mgr.verify_process_active(pid)]
-            if live_pids:
-                continue                                             # still running
+                for pid, count in window_counts.items():
+                    if count > manager.window_limit and pid != manager.excluded_pid:
+                        process_mgr.terminate_process(pid, manager.process_tracker)
 
-            if now - st["last_launch"] < manager.timeouts['launch_delay']:
-                continue                                             # respect delay
+                timing_trackers['window_check'] = current_timestamp
 
-            cookie = st["user_info"].get("cookie", "") \
-                     if isinstance(st["user_info"], dict) \
-                     else st["user_info"]
-            launcher.start_game_session(uid, cookie, st["user_info"])
-            st["last_launch"] = now
+            for user_id, state in user_states.items():
+                cookie = state["user_info"].get("cookie", "") if isinstance(state["user_info"], dict) else state["user_info"]
+                activity_status = manager.presence_monitor.check_user_activity(user_id, cookie, manager.auth_handler)
 
-        time.sleep(manager.check_intervals['main_tick'])
+                if activity_status is None:
+                    continue
+
+                if activity_status:
+                    user_states[user_id]["last_active"] = current_timestamp
+                    user_states[user_id]["inactive_since"] = None
+                    user_states[user_id]["requires_restart"] = False
+                else:
+                    if user_states[user_id]["inactive_since"] is None:
+                        user_states[user_id]["inactive_since"] = current_timestamp
+
+                    inactive_duration = current_timestamp - user_states[user_id]["inactive_since"]
+                    if inactive_duration >= manager.timeouts['offline']:
+                        if not user_states[user_id]["requires_restart"]:
+                            user_states[user_id]["requires_restart"] = True
+
+            restart_candidates = [user_id for user_id, state in user_states.items()
+                                if state["requires_restart"]]
+
+            if restart_candidates and (current_timestamp - timing_trackers['relaunch']) >= manager.timeouts['launch_delay']:
+                target_user = restart_candidates[0]
+                target_state = user_states[target_user]
+
+                running_pids = []
+                for pid in manager.process_tracker.user_processes.get(target_user, []):
+                    if process_mgr.verify_process_active(pid):
+                        running_pids.append(pid)
+
+                if running_pids:
+                    for pid in running_pids:
+                        process_mgr.terminate_process(pid, manager.process_tracker)
+
+                target_cookie = target_state["user_info"].get("cookie", "") if isinstance(target_state["user_info"], dict) else target_state["user_info"]
+                if launcher.start_game_session(target_user, target_cookie, target_state["user_info"]):
+                    user_states[target_user]["inactive_since"] = None
+                    user_states[target_user]["requires_restart"] = False
+                    timing_trackers['relaunch'] = current_timestamp
+
+        except Exception as error:
+            pass
+
+        time.sleep(manager.check_intervals['presence'])
 
 if __name__ == "__main__":
     execute_main_loop()
