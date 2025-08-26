@@ -178,7 +178,8 @@ class GameAccountOrchestrator:
             kill_timeout=tm_cfg.get("kill_timeout", 1740),
             poll_interval=tm_cfg.get("poll_interval", 10),
             webhook_url=tm_cfg.get("webhook_url", ""),
-            ping_message=tm_cfg.get("ping_message", "<@YourPing> This message is sent whenever your active processes drop to 1 or 0, for debugging, leave webhook empty if not interested")
+            ping_message=tm_cfg.get("ping_message", "<@YourPing> This message is sent whenever your active processes drop to 1 or 0, for debugging, leave webhook empty if not interested"),
+            kill_timeout_disabled=tm_cfg.get("kill_timeout_disabled", False)
         )
 
     def _retrieve_configurations(self):
@@ -212,6 +213,7 @@ class GameAccountOrchestrator:
                     },
                     "timeout_monitor": {
                         "kill_timeout": 1740,
+                        "kill_timeout_disabled": False,
                         "poll_interval": 10,
                         "webhook_url": "",
                         "ping_message": "<@YourPing> This message is sent whenever your active processes drop to 1 or 0, for debugging, leave webhook empty if not interested"
@@ -229,6 +231,7 @@ class GameAccountOrchestrator:
                 },
                 "timeout_monitor": {
                     "kill_timeout": 1740,
+                    "kill_timeout_disabled": False,
                     "poll_interval": 10,
                     "webhook_url": "",
                     "ping_message": "<@YourPing> This message is sent whenever your active processes drop to 1 or 0, for debugging, leave webhook empty if not interested"

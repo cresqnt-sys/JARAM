@@ -9,8 +9,10 @@ class TimeoutMonitor:
                  kill_timeout: int,
                  poll_interval: int,
                  webhook_url: str,
-                 ping_message: str):
+                 ping_message: str,
+                 kill_timeout_disabled: bool = False):
         self.kill_timeout        = kill_timeout
+        self.kill_timeout_disabled = kill_timeout_disabled
         self.poll_interval       = poll_interval
         self.webhook_url         = webhook_url
         self.ping_message        = ping_message
@@ -63,10 +65,11 @@ class TimeoutMonitor:
                 procs = [p for p in psutil.process_iter(["pid","name","create_time"])
                         if p.info["name"] == TARGET_NAME]
 
-                # age-based kill
-                for p in procs:
-                    if time.time() - p.create_time() >= self.kill_timeout:
-                        self._kill(p, "age-limit")
+                # age-based kill (only if not disabled)
+                if not self.kill_timeout_disabled:
+                    for p in procs:
+                        if time.time() - p.create_time() >= self.kill_timeout:
+                            self._kill(p, "age-limit")
 
                 # webhook when count drops to ≤ 1
                 count = len(procs)
@@ -74,7 +77,10 @@ class TimeoutMonitor:
                     self._send_webhook()
                 last_count = count
 
-                self.msg_q.put(f"TimeoutMon: {count} procs")
+                status_msg = f"TimeoutMon: {count} procs"
+                if self.kill_timeout_disabled:
+                    status_msg += " (kill timeout disabled)"
+                self.msg_q.put(status_msg)
 
             except Exception:
                 traceback.print_exc(file=sys.stderr)

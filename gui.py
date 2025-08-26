@@ -65,6 +65,7 @@ class ConfigManager:
             },
             "timeout_monitor": {
                 "kill_timeout": 1740,
+                "kill_timeout_disabled": False,
                 "poll_interval": 10,
                 "webhook_url": "",
                 "ping_message": "<@YourPing> This message is sent whenever your active processes drop to 1 or 0, for debugging, leave webhook empty if not interested"
@@ -2259,11 +2260,25 @@ class RobloxManagerGUI(QMainWindow):
         self.settings_strap_threshold_input.setToolTip("Max number of strap.exe helpers before trimming")
         timeout_layout.addRow("Strap Limit:", self.settings_strap_threshold_input)
 
+        # Kill timeout with disable checkbox
+        kill_timeout_container = QWidget()
+        kill_timeout_layout = QHBoxLayout(kill_timeout_container)
+        kill_timeout_layout.setContentsMargins(0, 0, 0, 0)
+        
         self.kill_timeout_input = QSpinBox()
         self.kill_timeout_input.setRange(60, 7200)
         self.kill_timeout_input.setSuffix(" s")
         self.kill_timeout_input.setToolTip("Time until window auto-closes (≤ 1,740s recommended)")
-        timeout_layout.addRow("Kill After:", self.kill_timeout_input)
+        
+        self.disable_kill_timeout_checkbox = QCheckBox("Disable")
+        self.disable_kill_timeout_checkbox.setToolTip("Disable automatic process termination")
+        self.disable_kill_timeout_checkbox.toggled.connect(self.on_disable_kill_timeout_toggled)
+        
+        kill_timeout_layout.addWidget(self.kill_timeout_input)
+        kill_timeout_layout.addWidget(self.disable_kill_timeout_checkbox)
+        kill_timeout_layout.addStretch()
+        
+        timeout_layout.addRow("Kill After:", kill_timeout_container)
 
         self.poll_interval_input = QSpinBox()
         self.poll_interval_input.setRange(1, 120)
@@ -3233,6 +3248,8 @@ class RobloxManagerGUI(QMainWindow):
 
         tm = cfg.get("timeout_monitor", {})
         self.kill_timeout_input.setValue(tm.get("kill_timeout", 1740))
+        self.disable_kill_timeout_checkbox.setChecked(tm.get("kill_timeout_disabled", False))
+        self.on_disable_kill_timeout_toggled(tm.get("kill_timeout_disabled", False))
         self.poll_interval_input.setValue(tm.get("poll_interval", 10))
         self.webhook_input.setText(tm.get("webhook_url", ""))
         self.ping_msg_input.setText(tm.get("ping_message", "<@YourPing> This message is sent whenever your active processes drop to 1 or 0, for debugging, leave webhook empty if not interested"))
@@ -3255,6 +3272,7 @@ class RobloxManagerGUI(QMainWindow):
             },
             "timeout_monitor": {
                 "kill_timeout": self.kill_timeout_input.value(),
+                "kill_timeout_disabled": self.disable_kill_timeout_checkbox.isChecked(),
                 "poll_interval": self.poll_interval_input.value(),
                 "webhook_url": self.webhook_input.text().strip(),
                 "ping_message": self.ping_msg_input.text().strip() or "<@YourPing> This message is sent whenever your active processes drop to 1 or 0, for debugging, leave webhook empty if not interested"
@@ -3290,6 +3308,8 @@ class RobloxManagerGUI(QMainWindow):
 
         # ── timeout-monitor block (kill / poll / webhook) ─────────
         self.kill_timeout_input.setValue(t["kill_timeout"])
+        self.disable_kill_timeout_checkbox.setChecked(t.get("kill_timeout_disabled", False))
+        self.on_disable_kill_timeout_toggled(t.get("kill_timeout_disabled", False))
         self.poll_interval_input.setValue(t["poll_interval"])
         self.webhook_input.setText(t["webhook_url"])
         self.ping_msg_input.setText(t["ping_message"])
@@ -3683,6 +3703,14 @@ class RobloxManagerGUI(QMainWindow):
         else:
             self.account_place_id_label.show()
             self.account_place_id.show()
+
+    def on_disable_kill_timeout_toggled(self, checked):
+        """Handle disable kill timeout checkbox toggle"""
+        self.kill_timeout_input.setEnabled(not checked)
+        if checked:
+            self.kill_timeout_input.setToolTip("Kill timeout is disabled")
+        else:
+            self.kill_timeout_input.setToolTip("Time until window auto-closes (≤ 1,740s recommended)")
 
     def clear_account_form(self):
         """Clear all form fields"""
