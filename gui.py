@@ -3,43 +3,41 @@ import json
 import time
 import os
 import shutil
-import requests
-import psutil
-import re
 from datetime import datetime
 from pathlib import Path
 from urllib.request import urlopen
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                             QHBoxLayout, QGridLayout, QTabWidget, QTableWidget,
                             QTableWidgetItem, QPushButton, QLabel, QLineEdit,
-                            QSpinBox, QTextEdit, QGroupBox,QStackedLayout,
+                            QSpinBox, QTextEdit, QGroupBox, QStackedLayout,
                             QProgressBar, QComboBox, QCheckBox, QSplitter,
                             QHeaderView, QMessageBox, QDialog, QDialogButtonBox,
-                            QFormLayout, QScrollArea, QFrame, QSizePolicy)
-from PyQt6.QtCore import QTimer, QThread, pyqtSignal, Qt, QSize,  QBuffer, QByteArray, QIODevice, QRectF, QPointF
-from PyQt6.QtGui import QFont, QIcon, QPalette, QColor, QPixmap, QPainter, QMovie, QRegion, QPainterPath
-from main import RobloxManager, ProcessManager, GameLauncher
+                            QFormLayout, QScrollArea, QFrame, QSizePolicy, QRadioButton)
+from PyQt6.QtCore import QTimer, QThread, pyqtSignal, Qt, QSize, QBuffer, QByteArray, QIODevice, QPointF, QPoint
+from PyQt6.QtGui import QFont, QIcon, QPalette, QColor, QPixmap, QPainter, QMovie, QRegion, QPainterPath, QMouseEvent
+from main import GameAccountOrchestrator, ApplicationProcessController, GameSessionInitiator, APP_VERSION, limit_strap_helpers
 from cookie_extractor import CookieExtractor
-from RAM_export import transform         # re-use your parsing helper
-from main import limit_strap_helpers
+from auto_updater import AutoUpdater
+from RAM_export import transform
 from log_utils import find_log_for_username, R_DISC_REASON, R_DISC_NOTIFY, R_DISC_SENDING, R_CONN_LOST
 
 def _get_icon_path():
-
-    icon_path = "JARAM.ico"
-    if os.path.exists(icon_path):
-        return icon_path
-
+    # Try multiple locations for the icon file
+    possible_paths = [
+        "JARAM.ico",  # Current directory
+        os.path.join(os.path.dirname(os.path.abspath(__file__)), "JARAM.ico"),  # Script directory
+    ]
+    
+    # If running as PyInstaller bundle, check the temp directory
     if hasattr(sys, '_MEIPASS'):
-        icon_path = os.path.join(sys._MEIPASS, "JARAM.ico")
+        possible_paths.insert(0, os.path.join(sys._MEIPASS, "JARAM.ico"))
+    
+    for icon_path in possible_paths:
         if os.path.exists(icon_path):
+            print(f"Found icon at: {icon_path}")  # Debug print
             return icon_path
-
-    script_dir = os.path.dirname(os.path.abspath(__file__))
-    icon_path = os.path.join(script_dir, "JARAM.ico")
-    if os.path.exists(icon_path):
-        return icon_path
-
+    
+    print("Icon not found in any location")  # Debug print
     return None
 
 class ConfigManager:
@@ -50,7 +48,6 @@ class ConfigManager:
         self.users_file = self.config_dir / "users.json"
         self.settings_file = self.config_dir / "settings.json"
         self.backup_dir = self.config_dir / "backups"
-        
 
         self._ensure_directories()
 
@@ -58,25 +55,40 @@ class ConfigManager:
             "window_limit": 1,
             "timeouts": {
                 "strap_threshold": 10,
-                "offline"             : 25,   # restart-after-inactive
-                "launch_delay"        : 10,    # normal relaunch cadence
-                "initial_delay"       : 10,     # seconds between first-run launches
-                "kill_timeout"        : 1740,  # 29m
-                "poll_interval"       : 10,
-                "webhook_url"         : "",     # fill in GUI
-                "ping_message"        : "<@YourPing> This message is sent whenever your active processes drop to 1 or 0, for debugging. Leave webhook empty if not interested"
+                "offline": 25,
+                "launch_delay": 10,
+                "initial_delay": 10,
+                "kill_timeout": 1740,
+                "poll_interval": 10,
+                "webhook_url": "",
+                "ping_message": "<@YourPing> This message is sent whenever your active processes drop to 1 or 0, for debugging, leave webhook empty if not interested"
+            },
+            "timeout_monitor": {
+                "kill_timeout": 1740,
+                "poll_interval": 10,
+                "webhook_url": "",
+                "ping_message": "<@YourPing> This message is sent whenever your active processes drop to 1 or 0, for debugging, leave webhook empty if not interested"
+            },
+            "process_management": {
+                "limit_strap_processes": True
             }
         }
-
 
         self.default_user_structure = {
             "username": "",
             "cookie": "",
             "private_server_link": "",
-            "place": "",
-            "bad": False
+            "place": ""
         }
-        
+
+    def _deep_update(self, base, update):
+        """Recursively update base dict with update dict."""
+        for k, v in update.items():
+            if isinstance(v, dict) and isinstance(base.get(k), dict):
+                base[k] = self._deep_update(base[k], v)
+            else:
+                base[k] = v
+        return base
 
     def _get_config_directory(self):
         if os.name == 'nt':  
@@ -139,15 +151,6 @@ class ConfigManager:
             if temp_path.exists():
                 temp_path.unlink()
             raise e
-    # ADD this helper anywhere inside the class
-    def _deep_update(self, base: dict, updates: dict):
-        """Recursive dict.update so nested keys survive partial files."""
-        for k, v in updates.items():
-            if isinstance(v, dict) and isinstance(base.get(k), dict):
-                base[k] = self._deep_update(base[k], v)
-            else:
-                base[k] = v
-        return base
 
     def load_users(self):
         try:
@@ -223,8 +226,7 @@ class ConfigManager:
                     "username": f"User_{user_id}",  
                     "cookie": cookie,
                     "private_server_link": "",
-                    "place": "",
-                    "bad": False
+                    "place": ""
                 }
             else:
 
@@ -238,59 +240,59 @@ class ConfigManager:
         new_data = {}
         for user_id, user_info in users_data.items():
             if isinstance(user_info, str):
-
+                # Legacy format - just cookie string
                 new_data[user_id] = {
                     "username": f"User_{user_id}",
                     "cookie": user_info,
+                    "server_type": "private",  # Default to private for backward compatibility
                     "private_server_link": "",
-                    "place": ""
+                    "place_id": "",
+                    "disabled": False  # Default to enabled for backward compatibility
                 }
             elif isinstance(user_info, dict):
-
+                # Ensure all required fields exist with backward compatibility
                 new_data[user_id] = {
                     "username": user_info.get("username", f"User_{user_id}"),
                     "cookie": user_info.get("cookie", ""),
+                    "server_type": user_info.get("server_type", "private"),  # Default to private
                     "private_server_link": user_info.get("private_server_link", ""),
-                    "place": user_info.get("place", ""),
-                    "bad":  user_info.get("bad", False)
+                    "place_id": user_info.get("place_id", ""),
+                    "disabled": user_info.get("disabled", False)  # Default to enabled for backward compatibility
                 }
             else:
-
+                # Invalid format
                 new_data[user_id] = {
                     "username": f"User_{user_id}",
                     "cookie": "",
+                    "server_type": "private",
                     "private_server_link": "",
-                    "place": "",
-                    "bad":  ""
+                    "place_id": ""
                 }
         return new_data
-
-    def mark_bad_cookie(self, user_id: str, state: bool) -> None:
-        users = self.load_users()
-        if user_id in users and users[user_id].get("bad", False) != state:
-            users[user_id]["bad"] = state
-            self.save_users(users)
-
-    def clear_all_bad_flags(self):
-        users = self.load_users()
-        for info in users.values():
-            info["bad"] = False
-        self.save_users(users)
 
     def get_users_for_manager(self):
         users = self.load_users()
         manager_format = {}
         for user_id, user_info in users.items():
             if isinstance(user_info, dict):
-
-                manager_format[user_id] = user_info
+                # Ensure all required fields exist with backward compatibility
+                manager_format[user_id] = {
+                    "username": user_info.get("username", f"User_{user_id}"),
+                    "cookie": user_info.get("cookie", ""),
+                    "server_type": user_info.get("server_type", "private"),
+                    "private_server_link": user_info.get("private_server_link", ""),
+                    "place_id": user_info.get("place_id", ""),
+                    "disabled": user_info.get("disabled", False)
+                }
             else:
-
+                # Legacy format - just cookie string
                 manager_format[user_id] = {
                     "username": f"User_{user_id}",
                     "cookie": user_info,
+                    "server_type": "private",
                     "private_server_link": "",
-                    "place": ""
+                    "place_id": "",
+                    "disabled": False  # Default to enabled for legacy accounts
                 }
         return manager_format
 
@@ -301,19 +303,6 @@ class ConfigManager:
             "settings_file": str(self.settings_file),
             "backup_dir": str(self.backup_dir)
         }
-        
-    def mark_user_bad_cookie(self, user_id):
-        users = self.load_users()
-        if user_id in users:
-            users[user_id]["bad_cookie"] = True
-            self.save_users(users)
-
-    def clear_all_bad_cookies(self):
-        users = self.load_users()
-        for user in users.values():
-            user["bad_cookie"] = False
-        self.save_users(users)
-
 
 class ModernStyle:
     BACKGROUND = "#1e1e1e"
@@ -328,12 +317,24 @@ class ModernStyle:
     TEXT_SECONDARY = "#a1a1aa"
     BORDER = "#404040"
 
+    # Cache for frequently used styles
+    _style_cache = {}
+
+    @classmethod
+    def get_cached_style(cls, style_key, style_func):
+        """Get cached style or generate and cache it"""
+        if style_key not in cls._style_cache:
+            cls._style_cache[style_key] = style_func()
+        return cls._style_cache[style_key]
+
     @staticmethod
     def get_stylesheet():
         return f"""
         QMainWindow {{
             background-color: {ModernStyle.BACKGROUND};
             color: {ModernStyle.TEXT_PRIMARY};
+            border: 1px solid {ModernStyle.BORDER};
+            border-radius: 8px;
         }}
 
         QWidget {{
@@ -387,12 +388,13 @@ class ModernStyle:
             background-color: {ModernStyle.PRIMARY};
             color: {ModernStyle.TEXT_PRIMARY};
             border: none;
-            padding: 8px 16px;
-            border-radius: 6px;
+            padding: 4px 8px;
+            border-radius: 4px;
             font-weight: 500;
-            min-width: 80px;
-            min-height: 28px;
-            font-size: 13px;
+            min-width: 60px;
+            min-height: 20px;
+            max-height: 24px;
+            font-size: 12px;
         }}
 
         QPushButton:hover {{
@@ -400,7 +402,7 @@ class ModernStyle:
         }}
 
         QPushButton:pressed {{
-            background-color: 
+            background-color: #3730a3;
         }}
 
         QPushButton:disabled {{
@@ -413,7 +415,7 @@ class ModernStyle:
         }}
 
         QPushButton.success:hover {{
-            background-color: 
+            background-color: #059669;
         }}
 
         QPushButton.danger {{
@@ -421,7 +423,7 @@ class ModernStyle:
         }}
 
         QPushButton.danger:hover {{
-            background-color: 
+            background-color: #dc2626;
         }}
 
         QLineEdit, QSpinBox, QDoubleSpinBox, QComboBox {{
@@ -492,11 +494,6 @@ class ModernStyle:
             background-color: {ModernStyle.PRIMARY};
             border-color: {ModernStyle.PRIMARY};
         }}
-        
-        QCheckBox::indicator:disabled {{
-            background-color: {ModernStyle.SURFACE};
-            border-color: {ModernStyle.SURFACE};
-        }}
 
         QScrollBar:vertical {{
             background-color: {ModernStyle.SURFACE};
@@ -515,126 +512,191 @@ class ModernStyle:
         }}
         """
 
+class CustomTitleBar(QWidget):
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.parent = parent
+        self.setFixedHeight(32)  # Slightly taller for better proportions
+        self.setStyleSheet(f"""
+            CustomTitleBar {{
+                background-color: {ModernStyle.SURFACE_VARIANT};
+                border-bottom: 1px solid {ModernStyle.BORDER};
+            }}
+        """)
+        
+        # Track mouse position for window dragging
+        self.drag_position = QPoint()
+        
+        self.setup_ui()
+        
+    def setup_ui(self):
+        layout = QHBoxLayout(self)
+        layout.setContentsMargins(12, 0, 0, 0)  # Slightly more padding
+        layout.setSpacing(0)
+        
+        # App icon and title
+        icon_label = QLabel()
+        icon_path = _get_icon_path()
+        if icon_path:
+            pixmap = QPixmap(icon_path)
+            icon_label.setPixmap(pixmap.scaled(18, 18, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+        icon_label.setFixedSize(18, 18)
+        
+        title_label = QLabel("JARAM")
+        title_label.setStyleSheet(f"""
+            QLabel {{
+                color: {ModernStyle.TEXT_PRIMARY};
+                font-weight: 500;
+                font-size: 13px;
+                margin-left: 8px;
+                font-family: 'Segoe UI', Arial, sans-serif;
+            }}
+        """)
+        
+        layout.addWidget(icon_label)
+        layout.addWidget(title_label)
+        layout.addStretch()
+        
+        # Create button container for proper alignment
+        button_container = QWidget()
+        button_layout = QHBoxLayout(button_container)
+        button_layout.setContentsMargins(0, 0, 0, 0)
+        button_layout.setSpacing(0)
+        
+        # Window control buttons - minimize and close
+        self.minimize_btn = self.create_minimize_button()
+        self.close_btn = self.create_close_button()
+        
+        button_layout.addWidget(self.minimize_btn)
+        button_layout.addWidget(self.close_btn)
+        
+        layout.addWidget(button_container)
+        
+    def create_minimize_button(self):
+        btn = QPushButton()
+        btn.setFixedSize(36, 28)  # Same size as close button
+        btn.setText("−")
+        btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: transparent;
+                color: {ModernStyle.TEXT_SECONDARY};
+                border: none;
+                border-radius: 4px;
+                font-size: 12px;
+                font-weight: normal;
+                font-family: 'Segoe UI', Arial, sans-serif;
+            }}
+            QPushButton:hover {{
+                background-color: rgba(255, 255, 255, 0.1);
+                color: {ModernStyle.TEXT_PRIMARY};
+            }}
+            QPushButton:pressed {{
+                background-color: rgba(255, 255, 255, 0.2);
+            }}
+        """)
+        btn.clicked.connect(self.minimize_window)
+        return btn
+        
+    def create_close_button(self):
+        btn = QPushButton()
+        btn.setFixedSize(36, 28)  # Smaller close button
+        btn.setText("×")
+        btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: transparent;
+                color: {ModernStyle.TEXT_SECONDARY};
+                border: none;
+                border-radius: 4px;
+                font-size: 12px;
+                font-weight: normal;
+                font-family: 'Segoe UI', Arial, sans-serif;
+            }}
+            QPushButton:hover {{
+                background-color: #e81123;
+                color: white;
+            }}
+            QPushButton:pressed {{
+                background-color: #c50e1f;
+                color: white;
+            }}
+        """)
+        btn.clicked.connect(self.close_window)
+        return btn
+        
+    def minimize_window(self):
+        if self.parent:
+            self.parent.showMinimized()
+            
+    def close_window(self):
+        if self.parent:
+            self.parent.close()
+            
+    def mousePressEvent(self, event: QMouseEvent):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.drag_position = event.globalPosition().toPoint() - self.parent.frameGeometry().topLeft()
+            event.accept()
+            
+    def mouseMoveEvent(self, event: QMouseEvent):
+        if event.buttons() == Qt.MouseButton.LeftButton and self.parent:
+            if not self.parent.isMaximized():
+                self.parent.move(event.globalPosition().toPoint() - self.drag_position)
+            event.accept()
+            
+    def mouseDoubleClickEvent(self, event: QMouseEvent):
+        # Double-click functionality removed since maximize is disabled
+        pass
+
 class WorkerThread(QThread):
-    log_signal     = pyqtSignal(str)
-    status_signal  = pyqtSignal(dict)
+    log_signal = pyqtSignal(str)
+    status_signal = pyqtSignal(dict)
     process_signal = pyqtSignal(dict)
 
-    def __init__(self, cfg_manager):
+    def __init__(self):
         super().__init__()
-        self.cfg_manager      = cfg_manager
-        self.running          = False
-        self.manager          = None
-        self.process_mgr      = None
-        self.launcher         = None
-        self.user_states      = {}
-        self.log_pointers     = {}      #  NEW  {uid: last_byte_read}
-        self.timing_trackers  = {}
+        self.running = False
+        self.manager = None
+        self.process_mgr = None
+        self.launcher = None
+        self.user_states = {}
+        self.timing_trackers = {}
+        # Cache for previous status to avoid unnecessary updates
+        self._previous_status = {}
+        self._previous_process_data = {}
 
-        # thread-local mirrors (set after manager loads)
-        self.restart_threshold = 0
-        self.strap_threshold = 50
-        self.initial_delay     = 0
-        
-        self._last_proc_count = 0
-        self._last_growth_ts  = time.time()
-        
-        self.log_inactivity_timeout = 120      # seconds (2 min)
-
-    def _trace(self, uid: str, msg: str, *, every: float = 30.0) -> None:
-        """
-        Emit at most one identical trace per user every *every* seconds.
-        Grouping key = (uid, first word of msg).
-        """
-        now = time.time()
-        key = (uid, msg.split()[0])               # e.g., (“8735…”, “read”)
-        if not hasattr(self, "_trace_ts"):
-            self._trace_ts = {}
-        last = self._trace_ts.get(key, 0.0)
-
-        if now - last >= every:
-            self.log_signal.emit(f"[SCAN-TRACE] {uid}: {msg}")
-            self._trace_ts[key] = now
-
-    def _log(self, msg: str):
-        """Thread-safe logger → GUI Logs tab."""
-        self.log_signal.emit(msg)
-
-    def initialize_manager(self) -> bool:
+    def initialize_manager(self):
         try:
-            self.manager = RobloxManager(config_manager=self.cfg_manager)
-
-            self.manager.timeout_monitor.start()
-            
-            self.restart_threshold = self.manager.timeouts["offline"]
-            self.initial_delay     = self.manager.timeouts["initial_delay"]
-
-            self.process_mgr = ProcessManager(self.manager.excluded_pid)
-            self.launcher = GameLauncher(
-                self.manager.target_place,
+            self.manager = GameAccountOrchestrator()
+            self.process_mgr = ApplicationProcessController(self.manager.protected_process_id)
+            self.launcher = GameSessionInitiator(
+                self.manager.game_place_id,
                 self.process_mgr,
-                self.manager.auth_handler,
-                self.manager.process_tracker,
-                self.manager.config_manager,
-                launch_delay = self.manager.timeouts["launch_delay"],
-                initial_delay= self.manager.timeouts["initial_delay"]
+                self.manager.security_manager,
+                self.manager.process_monitor
             )
 
-            now = time.time()
-            while not self.manager.timeout_monitor.msg_q.empty():
-                self.log_signal.emit(self.manager.timeout_monitor.msg_q.get_nowait())
-            self.user_states = {
-                uid: {
-                    "last_active"    : now,
-                    "inactive_since" : None,
-                    "user_info"      : info,
-                    "requires_restart": False,
-                    "status"         : "Initializing"
-                } for uid, info in self.manager.settings.items()
-            }
-            for uid, info in self.manager.settings.items():
-                username = info.get("username") if isinstance(info, dict) else None
-                log_path = find_log_for_username(username, allow_fallback=False)
-                if log_path and os.path.isfile(log_path):
-                    self.log_pointers[uid] = os.path.getsize(log_path)
-                else:
-                    self.log_pointers[uid] = 0
+            # Start the timeout monitor
+            self.manager.timeout_monitor.start()
 
+            self.user_states = {user_id: {
+                "last_active": 0,
+                "inactive_since": None,
+                "user_info": user_info,
+                "requires_restart": False,
+                "status": "Initializing",
+                "last_check": 0
+            } for user_id, user_info in self.manager.user_configurations.items()
+            if not (isinstance(user_info, dict) and user_info.get("disabled", False))}
 
             self.timing_trackers = {
-                'window'  : 0,
-                'cleanup' : 0,
-                'relaunch': 0
+                'window_check': 0,
+                'relaunch': 0,
+                'cleanup': 0,
+                'orphan_check': 0
             }
+
             return True
         except Exception as e:
-            self.log_signal.emit(f"Manager init failed: {e}")
             return False
-
-    def apply_new_settings(self, cfg: dict):
-        if not self.manager:
-            return
-        self.manager.window_limit               = cfg["window_limit"]
-        self.manager.timeouts["launch_delay"]   = cfg["timeouts"]["launch_delay"]
-        self.manager.timeouts["offline"]        = cfg["timeouts"]["offline"]
-        self.manager.timeouts["initial_delay"]  = cfg["timeouts"]["initial_delay"]
-        self.strap_threshold = cfg["timeouts"].get("strap_threshold", 50)
-
-        
-        tm = cfg["timeout_monitor"]
-        self.manager.timeout_monitor.kill_timeout        = tm["kill_timeout"]
-        self.manager.timeout_monitor.poll_interval       = tm["poll_interval"]
-        self.manager.timeout_monitor.webhook_url         = tm["webhook_url"]
-        self.manager.timeout_monitor.ping_message        = tm["ping_message"]
-
-        self.restart_threshold = cfg["timeouts"]["offline"]
-        self.initial_delay     = cfg["timeouts"]["initial_delay"]
-
-        if self.launcher:
-            self.launcher.launch_delay  = cfg["timeouts"]["launch_delay"]
-            self.launcher.initial_delay = cfg["timeouts"]["initial_delay"]
-
-
 
     def restart_user_session(self, user_id):
         if not self.manager or user_id not in self.user_states:
@@ -643,13 +705,13 @@ class WorkerThread(QThread):
         try:
             state = self.user_states[user_id]
 
-            for pid in self.manager.process_tracker.user_processes.get(user_id, []):
-                if self.process_mgr.verify_process_active(pid):
-                    self.process_mgr.terminate_process(pid, self.manager.process_tracker)
+            for pid in self.manager.process_monitor.account_process_mapping.get(user_id, []):
+                if self.process_mgr.confirm_process_running(pid):
+                    self.process_mgr.eliminate_process(pid, self.manager.process_monitor)
 
             cookie = state["user_info"].get("cookie", "") if isinstance(state["user_info"], dict) else state["user_info"]
             try:
-                if self.launcher.start_game_session(user_id, cookie, state["user_info"]):
+                if self.launcher.initiate_gaming_session(user_id, cookie, state["user_info"]):
                     self.user_states[user_id]["inactive_since"] = None
                     self.user_states[user_id]["requires_restart"] = False
                     self.user_states[user_id]["status"] = "Restarting"
@@ -661,25 +723,27 @@ class WorkerThread(QThread):
         except Exception as e:
             return False
 
-    def kill_user_processes(self, user_id: str) -> bool:
+    def kill_user_processes(self, user_id):
         if not self.manager or user_id not in self.user_states:
             return False
 
         try:
-            for pid in self.manager.process_tracker.user_processes.get(user_id, []).copy():
-                # always attempt to kill – even if verify() says it's gone or renamed
-                self.process_mgr.terminate_process(pid, self.manager.process_tracker)
-            return True
-        except Exception:
-            return False
+            killed_count = 0
+            for pid in self.manager.process_monitor.account_process_mapping.get(user_id, []).copy():
+                if self.process_mgr.confirm_process_running(pid):
+                    if self.process_mgr.eliminate_process(pid, self.manager.process_monitor):
+                        killed_count += 1
 
+            return True
+        except Exception as e:
+            return False
 
     def kill_all_processes(self):
         if not self.process_mgr:
             return False
 
         try:
-            killed = self.process_mgr.terminate_process(None, self.manager.process_tracker)
+            killed = self.process_mgr.eliminate_process(None, self.manager.process_monitor)
             return killed
         except Exception as e:
             return False
@@ -689,7 +753,7 @@ class WorkerThread(QThread):
             return False
 
         try:
-            self.process_mgr.cleanup_dead_processes(self.manager.process_tracker)
+            self.process_mgr.purge_terminated_processes(self.manager.process_monitor)
             return True
         except Exception as e:
             return False
@@ -700,206 +764,171 @@ class WorkerThread(QThread):
 
         self.running = True
 
-        # one-by-one first launch
-        self.launcher.initialize_all_sessions(self.manager.settings)
+        try:
+            self.launcher.bootstrap_all_gaming_sessions(self.manager.user_configurations)
+        except Exception as e:
+            pass
 
         while self.running:
-            now = time.time()
+            current_timestamp = time.time()
 
-            # -- housekeeping
-            if now - self.timing_trackers['cleanup'] >= self.manager.check_intervals['cleanup']:
-                self.process_mgr.cleanup_dead_processes(self.manager.process_tracker)
-                self.timing_trackers['cleanup'] = now
+            try:
 
-            if now - self.timing_trackers['window'] >= self.manager.check_intervals['window']:
-                for pid, nwin in self.process_mgr.count_windows_by_process().items():
-                    if nwin > self.manager.window_limit and pid != self.manager.excluded_pid:
-                        self.process_mgr.terminate_process(pid, self.manager.process_tracker)
-                self.timing_trackers['window'] = now
-            
-            # ── low-count watchdog ───────────────────────────────────────────
-            STUCK_TIMEOUT = 300        # seconds without growth  → action (5 min)
+                if current_timestamp - self.timing_trackers['cleanup'] >= self.manager.monitoring_intervals['maintenance']:
+                    self.process_mgr.purge_terminated_processes(self.manager.process_monitor)
+                    self.timing_trackers['cleanup'] = current_timestamp
 
-            total_users = len(self.manager.settings)
+                if current_timestamp - self.timing_trackers['orphan_check'] >= (self.manager.monitoring_intervals['maintenance'] * 2):
+                    self.process_mgr.remove_unmanaged_processes(
+                        self.manager.process_monitor,
+                        set(self.manager.user_configurations.keys())
+                    )
 
-            active_processes = sum(
-                1
-                for p in psutil.process_iter(['name', 'pid'])
-                if p.info['name'] == 'RobloxPlayerBeta.exe'
-                and p.info['pid'] != self.manager.excluded_pid
-            )
+                    # Limit strap processes if enabled
+                    if self.manager.limit_strap_processes:
+                        self.process_mgr.limit_strap_processes()
 
-            # reset timer whenever the process count grows
-            if active_processes > self._last_proc_count:
-                self._last_proc_count = active_processes
-                self._last_growth_ts  = now
-            else:
-                self._last_proc_count = active_processes
+                    self.timing_trackers['orphan_check'] = current_timestamp
 
-            # condition met: fewer PIDs than users **and** no growth for ≥ STUCK_TIMEOUT
-            if active_processes < total_users and (now - self._last_growth_ts) >= STUCK_TIMEOUT:
-                # Trim helpers but preserve the single oldest instance
-                limit_strap_helpers(threshold=1, kill_all=False)
-                self._last_growth_ts = now    # restart the timer
+                if current_timestamp - self.timing_trackers['window_check'] >= self.manager.monitoring_intervals['window_check']:
+                    window_counts = self.process_mgr.enumerate_window_instances()
 
+                    process_data = {}
+                    for pid, user_id in self.manager.process_monitor.process_ownership.items():
+                        if self.process_mgr.confirm_process_running(pid):
+                            create_time = self.manager.process_monitor.process_birth_times.get(pid, 0)
+                            window_count = window_counts.get(pid, 0)
+                            process_data[pid] = {
+                                'user_id': user_id,
+                                'created': datetime.fromtimestamp(create_time).strftime("%H:%M:%S") if create_time else "Unknown",
+                                'windows': window_count
+                            }
 
-            # -- per-user heartbeat ----------------------------------------
-            status = {}
-            kill_t = self.manager.timeout_monitor.kill_timeout
+                    # Only emit if process data has changed
+                    if process_data != self._previous_process_data:
+                        self.process_signal.emit(process_data)
+                        self._previous_process_data = process_data.copy()
 
-            for uid, st in self.user_states.items():
+                    for pid, count in window_counts.items():
+                        if count > self.manager.maximum_windows and pid != self.manager.protected_process_id:
+                            self.process_mgr.eliminate_process(pid, self.manager.process_monitor)
 
-                # ── 1. bad-cookie rows stay, but never launch ───────────────
-                if st["user_info"].get("bad", False):
-                    st["status"] = "Bad"
+                    self.timing_trackers['window_check'] = current_timestamp
 
-                    # make a minimal row so the GUI can display it
-                    status[uid] = {
-                        "status"        : "Bad",
-                        "pids"          : [],          # none running
-                        "needs_restart" : False,
-                        "last_active"   : st["last_active"],
-                        "inactive_since": st["inactive_since"],
-                        "ttl"           : []
-                    }
-                    continue                           # skip launch / restart logic # do NOT manage this account
-                live = [
-                    pid for pid in self.manager.process_tracker.user_processes.get(uid, [])
-                    if self.process_mgr.verify_process_active(pid)
-                ]
-                
-                # ── instant disconnect detection ─────────────────────────────
-                uname     = str(st.get("user_info", {}).get("username", "")).lower()
-                log_path  = find_log_for_username(uname, allow_fallback=False)
-                disconnect_code = None         # will hold “276”, “17”, etc.
+                # Only update status every 5 seconds to reduce UI overhead
+                status_update_interval = 5
+                should_update_status = current_timestamp - self.timing_trackers.get('status_update', 0) >= status_update_interval
 
-                if not live:
-                    self._trace(uid, "skip — no live proc")
-                elif not log_path or not os.path.isfile(log_path):
-                    self._trace(uid, f"skip — log not found ({log_path})")
-                else:
-                    try:
-                        last_pos   = self.log_pointers.get(uid, 0)
-                        current_sz = os.path.getsize(log_path)
-
-                        # log rotated? → start scanning from END to avoid old lines
-                        if current_sz < last_pos:
-                            last_pos = current_sz
-
-                        # read only new bytes
-                        with open(log_path, "r", encoding="utf-8", errors="ignore") as f:
-                            f.seek(last_pos)
-                            chunk = f.read()
-
-                        self.log_pointers[uid] = current_sz
-                        if chunk:
-                            self._trace(uid, f"read {len(chunk)} bytes")
-
-                            for line in chunk.splitlines():
-                                # ── skip chat-relay lines like
-                                #    “… Incoming MessageReceived … Text: [FLog::Network] …”
-                                pos_net = line.lower().find("[flog::network]")
-                                pos_txt = line.lower().find("text:")
-
-                                if pos_txt != -1 and pos_txt < pos_net:
-                                    continue          # embedded quote – not a genuine network log
-
-                                # --- genuine disconnect markers ---------------------------------
-                                if   (m := R_DISC_REASON.search(line)) \
-                                or (m := R_DISC_NOTIFY.search(line)) \
-                                or (m := R_DISC_SENDING.search(line)):
-                                    disconnect_code = m.group(1)
-                                    break
-                                elif R_CONN_LOST.search(line):
-                                    disconnect_code = "unknown"
-                                    break
-                            if disconnect_code is not None:
-                                self.log_signal.emit(
-                                    f"⚠️  {uname} disconnect detected (reason {disconnect_code}) – terminating process"
-                                )
-                                self.kill_user_processes(uid)
-                                st["requires_restart"] = True
-
-                    except Exception as e:
-                        self._trace(uid, f"log scan error: {e}")
-
-                # ----- TTL list (for display) -----------------------------
-                ttl_list = []
-                for pid in live:
-                    ct  = self.manager.process_tracker.creation_timestamps.get(pid, now)
-                    ttl = max(0, int(kill_t - (now - ct)))
-                    ttl_list.append(ttl)
-
-                # ----- state machine --------------------------------------
-                if live:                                        # client running
-                    st["last_active"]     = now
-                    st["inactive_since"]  = None
-                    st["requires_restart"]= False
-                    st["status"]          = "Active"
-                else:                                           # all windows gone
-                    if st["inactive_since"] is None:
-                        st["inactive_since"] = now
-                    idle = now - st["inactive_since"]
-                    st["status"] = f"Inactive ({int(idle)} s)"
-                    if idle >= self.restart_threshold:
-                        st["requires_restart"] = True
-
-                # ----- row sent to GUI ------------------------------------
-                status[uid] = {
-                    "status"        : st["status"],
-                    "pids"          : live,
-                    "needs_restart" : st["requires_restart"],
-                    "last_active"   : st["last_active"],
-                    "inactive_since": st["inactive_since"],
-                    "ttl"           : ttl_list
-
-                }
-
-            self.status_signal.emit(status)
-
-            # 1️⃣  build a dict:  pid -> {user_id, created, windows}
-            proc_info = {}
-            for uid, pids in self.manager.process_tracker.user_processes.items():
-                for pid in pids:
-                    if not self.process_mgr.verify_process_active(pid):
+                status_data = {}
+                for user_id, state in self.user_states.items():
+                    # Skip frequent checks for the same user
+                    if current_timestamp - state.get("last_check", 0) < 5:
+                        # Use cached status data
+                        status_data[user_id] = {
+                            'status': state.get('status', 'Unknown'),
+                            'pids': self.manager.process_monitor.account_process_mapping.get(user_id, []),
+                            'needs_restart': state.get("requires_restart", False),
+                            'last_active': state.get("last_active", 0),
+                            'inactive_since': state.get("inactive_since")
+                        }
                         continue
-                    created = datetime.fromtimestamp(
-                        self.manager.process_tracker.creation_timestamps.get(pid, time.time())
-                    ).strftime("%H:%M:%S")
-                    windows = self.process_mgr.count_windows_by_process().get(pid, 0)
-                    proc_info[pid] = {
-                        "user_id": uid,
-                        "created": created,
-                        "windows": windows,
+
+                    cookie = state["user_info"].get("cookie", "") if isinstance(state["user_info"], dict) else state["user_info"]
+                    activity_status = self.manager.activity_tracker.verify_user_online_status(
+                        user_id, cookie, self.manager.security_manager
+                    )
+
+                    state["last_check"] = current_timestamp
+
+                    if activity_status is None:
+
+                        status_data[user_id] = {
+                            'status': state.get('status', 'API Error'),
+                            'pids': self.manager.process_monitor.account_process_mapping.get(user_id, []),
+                            'needs_restart': state.get("requires_restart", False),
+                            'last_active': state.get("last_active", 0),
+                            'inactive_since': state.get("inactive_since")
+                        }
+                        continue
+
+                    if activity_status:
+                        self.user_states[user_id]["last_active"] = current_timestamp
+                        self.user_states[user_id]["inactive_since"] = None
+                        self.user_states[user_id]["requires_restart"] = False
+                        self.user_states[user_id]["status"] = "Active"
+                        status = "Active"
+                    else:
+                        if self.user_states[user_id]["inactive_since"] is None:
+                            self.user_states[user_id]["inactive_since"] = current_timestamp
+
+                        inactive_duration = current_timestamp - self.user_states[user_id]["inactive_since"]
+                        if inactive_duration >= self.manager.timeout_configuration['inactivity_limit']:
+                            if not self.user_states[user_id]["requires_restart"]:
+                                self.user_states[user_id]["requires_restart"] = True
+
+                        status = f"Inactive ({int(inactive_duration)}s)"
+                        self.user_states[user_id]["status"] = status
+
+                    pids = self.manager.process_monitor.account_process_mapping.get(user_id, [])
+
+                    status_data[user_id] = {
+                        'status': status,
+                        'pids': pids,
+                        'needs_restart': self.user_states[user_id]["requires_restart"],
+                        'last_active': self.user_states[user_id]["last_active"],
+                        'inactive_since': self.user_states[user_id]["inactive_since"]
                     }
 
-            # 2️⃣  notify the GUI
-            self.process_signal.emit(proc_info)
+                # Only emit status signal if there are changes or it's time for an update
+                if should_update_status or status_data != self._previous_status:
+                    self.status_signal.emit(status_data)
+                    self.timing_trackers['status_update'] = current_timestamp
+                    self._previous_status = status_data.copy()
 
-            # auto-restart oldest candidate
-            restartables = [
-                u for u, s in self.user_states.items()
-                if s["requires_restart"] and not s["user_info"].get("bad", False)            
-]
-            if restartables and (now - self.timing_trackers['relaunch']) >= self.manager.timeouts["launch_delay"]:
-                uid   = restartables[0]
-                info  = self.user_states[uid]["user_info"]
-                cookie = info.get("cookie", "") if isinstance(info, dict) else info
-                self.launcher.start_game_session(uid, cookie, info)
-                self.user_states[uid]["inactive_since"] = None
-                self.user_states[uid]["requires_restart"] = False
-                self.user_states[uid]["status"] = "Restarting"
-                self.timing_trackers['relaunch'] = now
-                
-                            # ── strap.exe limiter (queue empty) ───────────────────────
-            if not restartables:
-                limit_strap_helpers(threshold=self.strap_threshold)
-            time.sleep(self.manager.check_intervals['main_tick'])
+                restart_candidates = [user_id for user_id, state in self.user_states.items()
+                                    if state["requires_restart"]]
+
+                if restart_candidates and (current_timestamp - self.timing_trackers['relaunch']) >= self.manager.timeout_configuration['startup_delay']:
+                    target_user = restart_candidates[0]
+                    target_state = self.user_states[target_user]
+
+                    running_pids = []
+                    for pid in self.manager.process_monitor.account_process_mapping.get(target_user, []):
+                        if self.process_mgr.confirm_process_running(pid):
+                            running_pids.append(pid)
+
+                    if running_pids:
+                        for pid in running_pids:
+                            self.process_mgr.eliminate_process(pid, self.manager.process_monitor)
+
+                    target_cookie = target_state["user_info"].get("cookie", "") if isinstance(target_state["user_info"], dict) else target_state["user_info"]
+                    try:
+                        if self.launcher.initiate_gaming_session(target_user, target_cookie, target_state["user_info"]):
+                            self.user_states[target_user]["inactive_since"] = None
+                            self.user_states[target_user]["requires_restart"] = False
+                            self.user_states[target_user]["status"] = "Restarting"
+                            self.timing_trackers['relaunch'] = current_timestamp
+                    except Exception as e:
+                        pass
+
+            except Exception as error:
+                pass
+
+            time.sleep(self.manager.monitoring_intervals['activity_check'])
 
     def stop(self):
-        if self.manager and self.manager.timeout_monitor:
-            self.manager.timeout_monitor.stop()
         self.running = False
+        # Clean up resources to prevent memory leaks
+        if hasattr(self, 'manager') and self.manager:
+            if hasattr(self.manager, 'activity_tracker'):
+                # Clean up session pool
+                for session_data in self.manager.activity_tracker._connection_pool.values():
+                    session_data['session'].close()
+                self.manager.activity_tracker._connection_pool.clear()
+
+        # Clear caches
+        self._previous_status.clear()
+        self._previous_process_data.clear()
 
 class UserManagementDialog(QDialog):
 
@@ -908,15 +937,13 @@ class UserManagementDialog(QDialog):
         self.setWindowTitle("User Account Management")
         self.setModal(True)
 
-        self.resize(1400, 850)
-        self.setMinimumSize(1200, 700)
+        self.resize(1600, 950)
+        self.setMinimumSize(1400, 800)
         self.config_manager = ConfigManager()
         self.cookie_extractor = CookieExtractor(self)
         self.selected_user_id = None
         self.setup_ui()
         self.load_users()
-        self.skip_private_server_warning = False      # session-only
-
 
     def setup_ui(self):
         main_layout = QVBoxLayout(self)
@@ -1002,8 +1029,8 @@ class UserManagementDialog(QDialog):
         form_container = QWidget()
         form_container.setStyleSheet(f"""
             QWidget {{
-                background-color: {ModernStyle.BACKGROUND};
-                border: 1px solid {ModernStyle.SURFACE};
+                background-color: {ModernStyle.SURFACE};
+                border: 1px solid {ModernStyle.BORDER};
                 border-radius: 8px;
                 padding: 15px;
             }}
@@ -1023,17 +1050,41 @@ class UserManagementDialog(QDialog):
         form_layout.addWidget(QLabel("Username:"))
         form_layout.addWidget(self.username_input)
 
+        # Server Type Selection
+        form_layout.addWidget(QLabel("Server Type:"))
+        server_type_layout = QHBoxLayout()
+
+        self.private_server_radio = QRadioButton("Private Server")
+        self.public_server_radio = QRadioButton("Public Server")
+        self.private_server_radio.setChecked(True)  # Default to private server
+
+        self.private_server_radio.toggled.connect(self._on_server_type_changed)
+        self.public_server_radio.toggled.connect(self._on_server_type_changed)
+
+        server_type_layout.addWidget(self.private_server_radio)
+        server_type_layout.addWidget(self.public_server_radio)
+        server_type_layout.addStretch()
+        form_layout.addLayout(server_type_layout)
+
+        # Private Server Link (shown when Private Server is selected)
+        self.private_server_label = QLabel("Private Server Link:")
         self.private_server_input = QLineEdit()
-        self.private_server_input.setPlaceholderText("Enter private server link (recommended)")
+        self.private_server_input.setPlaceholderText("Enter private server link")
         self.private_server_input.setStyleSheet(self._get_input_style())
-        form_layout.addWidget(QLabel("Private Server Link:"))
+        form_layout.addWidget(self.private_server_label)
         form_layout.addWidget(self.private_server_input)
 
-        self.place_input = QLineEdit()
-        self.place_input.setPlaceholderText("Enter place ID")
-        self.place_input.setStyleSheet(self._get_input_style())
-        form_layout.addWidget(QLabel("Place:"))
-        form_layout.addWidget(self.place_input)
+        # Place ID (shown when Public Server is selected)
+        self.place_id_label = QLabel("Place ID:")
+        self.place_id_input = QLineEdit()
+        self.place_id_input.setPlaceholderText("Enter place ID (e.g., 15532962292)")
+        self.place_id_input.setStyleSheet(self._get_input_style())
+        form_layout.addWidget(self.place_id_label)
+        form_layout.addWidget(self.place_id_input)
+
+        # Initially hide place ID fields since private server is default
+        self.place_id_label.hide()
+        self.place_id_input.hide()
 
         form_layout.addWidget(QLabel("Cookie:"))
         cookie_layout = QHBoxLayout()
@@ -1048,6 +1099,56 @@ class UserManagementDialog(QDialog):
         self.browser_login_btn.clicked.connect(self.extract_cookie_from_browser)
         cookie_layout.addWidget(self.browser_login_btn)
         form_layout.addLayout(cookie_layout)
+
+        # Add some spacing before account status
+        form_layout.addWidget(QLabel(""))  # Empty label for spacing
+
+        # Account Status - make it more prominent
+        status_group = QGroupBox("Account Status")
+        status_layout = QVBoxLayout(status_group)
+
+        self.disabled_checkbox = QCheckBox("🚫 Disable this account (prevent automatic launching)")
+        self.disabled_checkbox.setToolTip("When checked, this account will not be launched automatically and will be excluded from the manager")
+        self.disabled_checkbox.setStyleSheet(f"""
+            QCheckBox {{
+                color: {ModernStyle.TEXT_PRIMARY};
+                font-size: 12px;
+                font-weight: bold;
+                padding: 8px;
+                spacing: 12px;
+            }}
+            QCheckBox::indicator {{
+                width: 20px;
+                height: 20px;
+                border: 2px solid {ModernStyle.BORDER};
+                border-radius: 4px;
+                background-color: {ModernStyle.SURFACE};
+            }}
+            QCheckBox::indicator:checked {{
+                background-color: #AA4444;
+                border-color: #AA4444;
+            }}
+            QCheckBox::indicator:checked:hover {{
+                background-color: #BB5555;
+                border-color: #BB5555;
+            }}
+        """)
+
+        status_layout.addWidget(self.disabled_checkbox)
+
+        # Add warning label
+        warning_label = QLabel("⚠️ Disabled accounts will not launch and will appear grayed out in the main interface")
+        warning_label.setStyleSheet(f"""
+            QLabel {{
+                color: #FFAA44;
+                font-size: 10px;
+                font-style: italic;
+                padding: 4px;
+            }}
+        """)
+        status_layout.addWidget(warning_label)
+
+        form_layout.addWidget(status_group)
 
         button_layout = QHBoxLayout()
         self.add_btn = QPushButton("Add User")
@@ -1073,6 +1174,21 @@ class UserManagementDialog(QDialog):
 
         return panel
 
+    def _on_server_type_changed(self):
+        """Handle server type radio button changes"""
+        if self.private_server_radio.isChecked():
+            # Show private server fields, hide place ID fields
+            self.private_server_label.show()
+            self.private_server_input.show()
+            self.place_id_label.hide()
+            self.place_id_input.hide()
+        else:
+            # Show place ID fields, hide private server fields
+            self.private_server_label.hide()
+            self.private_server_input.hide()
+            self.place_id_label.show()
+            self.place_id_input.show()
+
     def _create_controls_layout(self):
         controls_layout = QHBoxLayout()
 
@@ -1091,7 +1207,7 @@ class UserManagementDialog(QDialog):
                 background-color: {ModernStyle.SURFACE};
                 border: 2px solid {ModernStyle.BORDER};
                 border-radius: 6px;
-                padding: 10px 12px;
+                padding: 6px 10px;
                 color: {ModernStyle.TEXT_PRIMARY};
                 font-size: 13px;
                 min-height: 20px;
@@ -1107,18 +1223,19 @@ class UserManagementDialog(QDialog):
                 background-color: {ModernStyle.PRIMARY};
                 color: {ModernStyle.TEXT_PRIMARY};
                 border: none;
-                padding: 10px 20px;
+                padding: 6px 14px;
                 border-radius: 6px;
                 font-weight: 600;
                 font-size: 13px;
-                min-height: 20px;
-                min-width: 100px;
+                min-height: 24px;
+                max-height: 28px;
+                min-width: 80px;
             }}
             QPushButton:hover {{
                 background-color: {ModernStyle.PRIMARY_VARIANT};
             }}
             QPushButton:pressed {{
-                background-color: 
+                background-color: #3730a3;
             }}
         """
 
@@ -1128,7 +1245,7 @@ class UserManagementDialog(QDialog):
                 background-color: {ModernStyle.SURFACE_VARIANT};
                 color: {ModernStyle.TEXT_PRIMARY};
                 border: 1px solid {ModernStyle.BORDER};
-                padding: 10px 20px;
+                padding: 6px 16px;
                 border-radius: 6px;
                 font-weight: 500;
                 font-size: 13px;
@@ -1159,10 +1276,10 @@ class UserManagementDialog(QDialog):
                 border-radius: 4px;
                 font-weight: 600;
                 font-size: 12px;
-                min-width: 70px;
-                max-width: 80px;
-                min-height: 30px;
-                max-height: 32px;
+                min-width: 60px;
+                max-width: 70px;
+                min-height: 24px;
+                max-height: 26px;
             }}
             QPushButton:hover {{
                 background-color: {hover_color};
@@ -1219,13 +1336,15 @@ class UserManagementDialog(QDialog):
 
         if isinstance(user_info, dict):
             username = user_info.get("username", f"User_{user_id}")
+            server_type = user_info.get("server_type", "private")
             private_server_link = user_info.get("private_server_link", "")
-            place = user_info.get("place", "")
+            place_id = user_info.get("place_id", "")
             cookie = user_info.get("cookie", "")
         else:
             username = f"User_{user_id}"
+            server_type = "private"  # Legacy format defaults to private
             private_server_link = ""
-            place = ""
+            place_id = ""
             cookie = user_info
 
         header_layout = QVBoxLayout()
@@ -1262,21 +1381,21 @@ class UserManagementDialog(QDialog):
         info_layout = QVBoxLayout()
         info_layout.setSpacing(2)
 
-        if place:
-            place_label = QLabel(f"Place: {place}")
-            place_label.setStyleSheet(f"""
-                QLabel {{
-                    color: {ModernStyle.TEXT_SECONDARY};
-                    font-size: 11px;
-                    margin: 0px;
-                    padding: 0px;
-                }}
-            """)
-            place_label.setWordWrap(True)
-            info_layout.addWidget(place_label)
+        # Server Type indicator
+        server_type_label = QLabel(f"Type: {'Private Server' if server_type == 'private' else 'Public Server'}")
+        server_type_label.setStyleSheet(f"""
+            QLabel {{
+                color: {ModernStyle.PRIMARY if server_type == 'private' else ModernStyle.SECONDARY};
+                font-size: 11px;
+                font-weight: bold;
+                margin: 0px;
+                padding: 0px;
+            }}
+        """)
+        info_layout.addWidget(server_type_label)
 
-        if private_server_link:
-
+        # Show connection info based on server type
+        if server_type == "private" and private_server_link:
             if "roblox.com/share" in private_server_link:
                 server_text = "Share Link: " + private_server_link.split("?")[1][:25] + "..."
             elif len(private_server_link) > 35:
@@ -1294,8 +1413,20 @@ class UserManagementDialog(QDialog):
                 }}
             """)
             server_label.setWordWrap(True)
-            server_label.setToolTip(private_server_link)  
+            server_label.setToolTip(private_server_link)
             info_layout.addWidget(server_label)
+        elif server_type == "public" and place_id:
+            place_id_label = QLabel(f"Place ID: {place_id}")
+            place_id_label.setStyleSheet(f"""
+                QLabel {{
+                    color: {ModernStyle.TEXT_SECONDARY};
+                    font-size: 11px;
+                    margin: 0px;
+                    padding: 0px;
+                }}
+            """)
+            place_id_label.setWordWrap(True)
+            info_layout.addWidget(place_id_label)
 
         layout.addLayout(info_layout)
 
@@ -1329,18 +1460,32 @@ class UserManagementDialog(QDialog):
         user_info = self.original_config[user_id]
         if isinstance(user_info, dict):
             self.user_id_input.setText(user_id)
-            self.user_id_input.setEnabled(False)  
+            self.user_id_input.setEnabled(False)
             self.username_input.setText(user_info.get("username", f"User_{user_id}"))
             self.private_server_input.setText(user_info.get("private_server_link", ""))
-            self.place_input.setText(user_info.get("place", ""))
+            self.place_id_input.setText(user_info.get("place_id", ""))
             self.cookie_input.setText(user_info.get("cookie", ""))
+
+            # Set server type radio buttons
+            server_type = user_info.get("server_type", "private")  # Default to private for backward compatibility
+            if server_type == "public":
+                self.public_server_radio.setChecked(True)
+            else:
+                self.private_server_radio.setChecked(True)
+            self._on_server_type_changed()  # Update field visibility
+
+            # Set disabled status
+            self.disabled_checkbox.setChecked(user_info.get("disabled", False))
         else:
+            # Legacy format - treat as private server
             self.user_id_input.setText(user_id)
             self.user_id_input.setEnabled(False)
             self.username_input.setText(f"User_{user_id}")
             self.private_server_input.setText("")
-            self.place_input.setText("")
+            self.place_id_input.setText("")
             self.cookie_input.setText(user_info)
+            self.private_server_radio.setChecked(True)
+            self._on_server_type_changed()
 
         self.add_btn.hide()
         self.update_btn.show()
@@ -1354,8 +1499,11 @@ class UserManagementDialog(QDialog):
         self.user_id_input.setEnabled(True)
         self.username_input.clear()
         self.private_server_input.clear()
-        self.place_input.clear()
+        self.place_id_input.clear()
         self.cookie_input.clear()
+        self.private_server_radio.setChecked(True)  # Reset to default
+        self.disabled_checkbox.setChecked(False)  # Reset to enabled
+        self._on_server_type_changed()  # Update field visibility
 
         self.add_btn.show()
         self.update_btn.hide()
@@ -1368,17 +1516,31 @@ class UserManagementDialog(QDialog):
         user_id = self.selected_user_id
         username = self.username_input.text().strip()
         private_server_link = self.private_server_input.text().strip()
-        place = self.place_input.text().strip()
+        place_id = self.place_id_input.text().strip()
         cookie = self.cookie_input.text().strip()
+
+        # Determine server type
+        server_type = "private" if self.private_server_radio.isChecked() else "public"
 
         if not username:
             username = f"User_{user_id}"
 
-        if not private_server_link:
-            if not self._confirm_missing_ps_link():
+        # Validate based on server type
+        if server_type == "private":
+            if not private_server_link:
+                QMessageBox.warning(self, "Error", "Private server link cannot be empty!")
                 self.private_server_input.setFocus()
                 return
+        else:  # public server
+            if not place_id:
+                QMessageBox.warning(self, "Error", "Place ID cannot be empty for public server!")
+                self.place_id_input.setFocus()
+                return
 
+            if not place_id.isdigit():
+                QMessageBox.warning(self, "Error", "Place ID should be numeric (e.g., 15532962292)")
+                self.place_id_input.setFocus()
+                return
 
         if not cookie:
             QMessageBox.warning(self, "Error", "Cookie cannot be empty!")
@@ -1387,47 +1549,26 @@ class UserManagementDialog(QDialog):
 
         self.original_config[user_id] = {
             "username": username,
-            "private_server_link": private_server_link,
-            "place": place,
+            "server_type": server_type,
+            "private_server_link": private_server_link if server_type == "private" else "",
+            "place_id": place_id if server_type == "public" else "",
             "cookie": cookie,
-            "bad": False
+            "disabled": self.disabled_checkbox.isChecked()
         }
 
         self.refresh_user_list()
         self.cancel_edit()
         QMessageBox.information(self, "Success", f"User {user_id} ({username}) updated successfully!")
 
-    def _confirm_missing_ps_link(self) -> bool:
-        """Return True to proceed with save, False to cancel."""
-        if self.skip_private_server_warning:
-            return True
-
-        box = QMessageBox(self)
-        box.setWindowTitle("No Private Server Link")
-        box.setIcon(QMessageBox.Icon.Warning)
-        box.setText(
-            "You didn’t enter a Private Server Link.\n\n"
-            "If you continue, the account will launch into a public server "
-            "using ‘Place:’ (or Sols RNG public lobby if that's missing as well)."
-        )
-        box.setInformativeText("Save anyway?")
-        box.setStandardButtons(QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.Cancel)
-        box.setDefaultButton(QMessageBox.StandardButton.Yes)
-
-        chk = QCheckBox("Don’t warn me again")
-        box.setCheckBox(chk)
-
-        decision = box.exec() == QMessageBox.StandardButton.Yes
-        if decision and chk.isChecked():
-            self.skip_private_server_warning = True   # remember only for this run
-        return decision
-
     def add_user(self):
         user_id = self.user_id_input.text().strip()
         username = self.username_input.text().strip()
         private_server_link = self.private_server_input.text().strip()
-        place = self.place_input.text().strip()
+        place_id = self.place_id_input.text().strip()
         cookie = self.cookie_input.text().strip()
+
+        # Determine server type
+        server_type = "private" if self.private_server_radio.isChecked() else "public"
 
         if not user_id:
             QMessageBox.warning(self, "Error", "Please enter a User ID")
@@ -1444,9 +1585,37 @@ class UserManagementDialog(QDialog):
             self.user_id_input.setFocus()
             return
 
-        if not private_server_link:
-            if not self._confirm_missing_ps_link():
+        # Validate based on server type
+        if server_type == "private":
+            if not private_server_link:
+                QMessageBox.warning(self, "Error", "Please enter a Private Server Link")
                 self.private_server_input.setFocus()
+                return
+
+            import re
+            pattern1 = r'roblox\.com/games/\d+/[^?]*\?privateServerLinkCode=[A-Za-z0-9_-]+'
+            pattern2 = r'roblox\.com/share\?code=[A-Za-z0-9_-]+&type=Server'
+
+            if not (re.search(pattern1, private_server_link) or re.search(pattern2, private_server_link)):
+                reply = QMessageBox.question(self, "Private Server Link Warning",
+                                           "The private server link doesn't appear to be in the expected format.\n\n"
+                                           "Supported formats:\n"
+                                           "• Direct Link: https://www.roblox.com/games/[ID]/[NAME]?privateServerLinkCode=[CODE]\n"
+                                           "• Share Link: https://www.roblox.com/share?code=[CODE]&type=Server\n\n"
+                                           "Continue anyway?",
+                                           QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+                if reply == QMessageBox.StandardButton.No:
+                    self.private_server_input.setFocus()
+                    return
+        else:  # public server
+            if not place_id:
+                QMessageBox.warning(self, "Error", "Please enter a Place ID for public server")
+                self.place_id_input.setFocus()
+                return
+
+            if not place_id.isdigit():
+                QMessageBox.warning(self, "Error", "Place ID should be numeric (e.g., 15532962292)")
+                self.place_id_input.setFocus()
                 return
 
         if not cookie:
@@ -1457,22 +1626,6 @@ class UserManagementDialog(QDialog):
         if not username:
             username = f"User_{user_id}"
 
-        import re
-        pattern1 = r'roblox\.com/games/\d+/[^?]*\?privateServerLinkCode=[A-Za-z0-9_-]+'
-        pattern2 = r'roblox\.com/share\?code=[A-Za-z0-9_-]+&type=Server'
-
-        if not (re.search(pattern1, private_server_link) or re.search(pattern2, private_server_link)):
-            reply = QMessageBox.question(self, "Private Server Link Warning",
-                                       "The private server link doesn't appear to be in the expected format.\n\n"
-                                       "Supported formats:\n"
-                                       "• Direct Link: https://www.roblox.com/games/[ID]/[NAME]?privateServerLinkCode=[CODE]\n"
-                                       "• Share Link: https://www.roblox.com/share?code=[CODE]&type=Server\n\n"
-                                       "Continue anyway?",
-                                       QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
-            if reply == QMessageBox.StandardButton.No:
-                self.private_server_input.setFocus()
-                return
-
         if not cookie.startswith('_|WARNING:-DO-NOT-SHARE-THIS.--Sharing-this-will-allow-someone-to-log-in-as-you-and-to-steal-your-ROBUX-and-items.|_'):
             reply = QMessageBox.question(self, "Cookie Warning",
                                        "The cookie doesn't appear to be in the expected ROBLOSECURITY format. Continue anyway?",
@@ -1482,20 +1635,23 @@ class UserManagementDialog(QDialog):
                 return
 
         try:
-
+            # Create account data with new structure
             self.original_config[user_id] = {
                 "username": username,
-                "private_server_link": private_server_link,
-                "place": place,
+                "server_type": server_type,
+                "private_server_link": private_server_link if server_type == "private" else "",
+                "place_id": place_id if server_type == "public" else "",
                 "cookie": cookie,
-                "bad": False
+                "disabled": self.disabled_checkbox.isChecked()
             }
 
             self.user_id_input.clear()
             self.username_input.clear()
             self.private_server_input.clear()
-            self.place_input.clear()
+            self.place_id_input.clear()
             self.cookie_input.clear()
+            self.private_server_radio.setChecked(True)  # Reset to default
+            self.disabled_checkbox.setChecked(False)  # Reset to enabled
 
             self.refresh_user_list()
 
@@ -1615,7 +1771,6 @@ class RoundMovieLabel(QLabel):
         self._inner_side = int(round(r * 2))   # 117 px
 
 
-        
 class RobloxManagerGUI(QMainWindow):
 
     def __init__(self):
@@ -1623,13 +1778,28 @@ class RobloxManagerGUI(QMainWindow):
         self.worker_thread = None
         self.process_data = {}
         self.config_manager = ConfigManager()
+        # Cache for previous data to avoid unnecessary table updates
+        self._previous_user_data = {}
+        self._previous_process_data = {}
+        
+        # Window resizing variables
+        self.resize_margin = 5
+        self.resizing = False
+        self.resize_direction = None
+        
         self.setup_ui()
         self.setup_timers()
 
     def setup_ui(self):
-        self.setWindowTitle("Jirach1 + JARAM - Just Another Roblox Account Manager")
+        self.setWindowTitle("Just Another Roblox Account Manager 1.1")
         self.setGeometry(100, 100, 1200, 800)
-
+        
+        # Remove default window frame and title bar
+        self.setWindowFlags(Qt.WindowType.FramelessWindowHint)
+        
+        # Add drop shadow effect
+        self.setAttribute(Qt.WidgetAttribute.WA_TranslucentBackground, False)
+        
         icon_path = _get_icon_path()
         if icon_path and os.path.exists(icon_path):
             self.setWindowIcon(QIcon(icon_path))
@@ -1637,10 +1807,22 @@ class RobloxManagerGUI(QMainWindow):
         central_widget = QWidget()
         self.setCentralWidget(central_widget)
         main_layout = QVBoxLayout(central_widget)
+        main_layout.setContentsMargins(0, 0, 0, 0)
+        main_layout.setSpacing(0)
+        
+        # Add custom title bar
+        self.title_bar = CustomTitleBar(self)
+        main_layout.addWidget(self.title_bar)
+        
+        # Content area with margins
+        content_widget = QWidget()
+        content_layout = QVBoxLayout(content_widget)
+        content_layout.setContentsMargins(10, 10, 10, 10)
+        main_layout.addWidget(content_widget)
 
         header_layout = QHBoxLayout()
 
-        title_label = QLabel("Jirach1 + JARAM - Just Another Roblox Account Manager")
+        title_label = QLabel("JARAM - Just Another Roblox Account Manager 1.1")
         title_font = QFont()
         title_font.setPointSize(18)
         title_font.setBold(True)
@@ -1660,7 +1842,7 @@ class RobloxManagerGUI(QMainWindow):
         self.stop_btn.clicked.connect(self.stop_manager)
         header_layout.addWidget(self.stop_btn)
 
-        main_layout.addLayout(header_layout)
+        content_layout.addLayout(header_layout)
 
         status_layout = QHBoxLayout()
         self.status_label = QLabel("Status: Stopped")
@@ -1672,48 +1854,32 @@ class RobloxManagerGUI(QMainWindow):
         self.uptime_label = QLabel("Uptime: 00:00:00")
         status_layout.addWidget(self.uptime_label)
 
-        main_layout.addLayout(status_layout)
+        content_layout.addLayout(status_layout)
 
         self.tab_widget = QTabWidget()
-        main_layout.addWidget(self.tab_widget)
+        content_layout.addWidget(self.tab_widget)
 
         self.setup_dashboard_tab()
         self.setup_users_tab()
+        self.setup_accounts_tab()
         self.setup_processes_tab()
         self.setup_logs_tab()
         self.setup_settings_tab()
         self.setup_RAMEXPORT_tab()
+        self.setup_donation_tab()
         self.setup_credits_tab()
-
-        self.setup_menu_bar()
 
         self.setStyleSheet(ModernStyle.get_stylesheet())
 
         self.start_time = None
         self.user_data = {}
 
-    def setup_menu_bar(self):
-        menubar = self.menuBar()
+        self.auto_updater = AutoUpdater()
+        self.pending_update = None
 
-        file_menu = menubar.addMenu("File")
+        QTimer.singleShot(2000, self.check_for_updates_on_startup)
 
-        manage_users_action = file_menu.addAction("Manage Users")
-        manage_users_action.triggered.connect(self.open_user_management)
 
-        file_menu.addSeparator()
-
-        exit_action = file_menu.addAction("Exit")
-        exit_action.triggered.connect(self.close)
-
-        help_menu = menubar.addMenu("Help")
-
-        config_location_action = help_menu.addAction("Show Config Location")
-        config_location_action.triggered.connect(self.show_config_location)
-
-        help_menu.addSeparator()
-
-        about_action = help_menu.addAction("About")
-        about_action.triggered.connect(self.show_about)
 
     def setup_dashboard_tab(self):
         dashboard_widget = QWidget()
@@ -1782,32 +1948,33 @@ class RobloxManagerGUI(QMainWindow):
         users_widget = QWidget()
         layout = QVBoxLayout(users_widget)
 
-        self.users_table = QTableWidget()
-        self.users_table.setColumnCount(10)      # was 9
-        self.users_table.setHorizontalHeaderLabels([
-            "User ID","Username","Private Server","Place",
-            "Status","PIDs","TTL(s)","Last Active",
-            "Inactive For","Actions"
-])
 
+
+        self.users_table = QTableWidget()
+        self.users_table.setColumnCount(8)
+        self.users_table.setHorizontalHeaderLabels([
+            "User ID", "Username", "Server Type", "Connection", "Status", "PIDs", "Last Active", "Actions"
+        ])
 
         header = self.users_table.horizontalHeader()
-        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(2, QHeaderView.ResizeMode.Fixed)  
-        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Fixed)  
-        header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)
-        header.setSectionResizeMode(6, QHeaderView.ResizeMode.Fixed)  
-        header.setSectionResizeMode(7, QHeaderView.ResizeMode.Stretch)  
-        header.setSectionResizeMode(8, QHeaderView.ResizeMode.Fixed)  
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)  # User ID
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.ResizeToContents)  # Username
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)  # Server Type
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)  # Connection
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.ResizeToContents)  # Status
+        header.setSectionResizeMode(5, QHeaderView.ResizeMode.ResizeToContents)  # PIDs
+        header.setSectionResizeMode(6, QHeaderView.ResizeMode.ResizeToContents)  # Last Active
+        header.setSectionResizeMode(7, QHeaderView.ResizeMode.Fixed)  # Actions
 
-        self.users_table.setColumnWidth(2, 200)  
-        self.users_table.setColumnWidth(3, 100)  
-        self.users_table.setColumnWidth(6, 100)  
-        self.users_table.setColumnWidth(8, 160)  
-        self.users_table.setColumnWidth(9, 170)
-        self.users_table.verticalHeader().setDefaultSectionSize(60)
+        self.users_table.setColumnWidth(3, 200)  # Connection
+        self.users_table.setColumnWidth(6, 100)  # Last Active
+        self.users_table.setColumnWidth(7, 130)  # Actions - smaller to fit buttons
+
+        self.users_table.verticalHeader().setDefaultSectionSize(50)  # Normal height
+
+        # Enable context menu for right-click actions
+        self.users_table.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.users_table.customContextMenuRequested.connect(self.show_user_context_menu)
 
         layout.addWidget(self.users_table)
 
@@ -1817,7 +1984,7 @@ class RobloxManagerGUI(QMainWindow):
         refresh_users_btn.clicked.connect(self.refresh_users)
         controls_layout.addWidget(refresh_users_btn)
 
-        add_user_btn = QPushButton("Modify Users")
+        add_user_btn = QPushButton("Add User")
         add_user_btn.clicked.connect(self.open_user_management)
         controls_layout.addWidget(add_user_btn)
 
@@ -1826,6 +1993,167 @@ class RobloxManagerGUI(QMainWindow):
         layout.addLayout(controls_layout)
 
         self.tab_widget.addTab(users_widget, "Users")
+
+    def setup_accounts_tab(self):
+        """Setup the account management tab"""
+        accounts_widget = QWidget()
+        layout = QVBoxLayout(accounts_widget)
+
+        # Header
+        header_label = QLabel("Account Management")
+        header_label.setStyleSheet(f"""
+            QLabel {{
+                font-size: 18px;
+                font-weight: bold;
+                color: {ModernStyle.TEXT_PRIMARY};
+                padding: 10px 0;
+            }}
+        """)
+        layout.addWidget(header_label)
+
+        # Create a horizontal layout for the form and account list
+        main_layout = QHBoxLayout()
+
+        # Left side - Add/Edit form
+        form_widget = QWidget()
+        form_widget.setMaximumWidth(400)
+        form_layout = QVBoxLayout(form_widget)
+
+        form_title = QLabel("Add New Account")
+        form_title.setStyleSheet(f"""
+            QLabel {{
+                font-size: 14px;
+                font-weight: bold;
+                color: {ModernStyle.TEXT_PRIMARY};
+                padding: 5px 0;
+            }}
+        """)
+        form_layout.addWidget(form_title)
+
+        # Form fields
+        self.account_user_id = QLineEdit()
+        self.account_user_id.setPlaceholderText("User ID (e.g., 123456789)")
+        form_layout.addWidget(QLabel("User ID:"))
+        form_layout.addWidget(self.account_user_id)
+
+        self.account_username = QLineEdit()
+        self.account_username.setPlaceholderText("Username (e.g., PlayerName)")
+        form_layout.addWidget(QLabel("Username:"))
+        form_layout.addWidget(self.account_username)
+
+        # Server type
+        form_layout.addWidget(QLabel("Server Type:"))
+        server_layout = QHBoxLayout()
+        self.account_private_radio = QRadioButton("Private Server")
+        self.account_public_radio = QRadioButton("Public Server")
+        self.account_private_radio.setChecked(True)
+        server_layout.addWidget(self.account_private_radio)
+        server_layout.addWidget(self.account_public_radio)
+        form_layout.addLayout(server_layout)
+
+        # Private server link
+        self.account_private_link = QLineEdit()
+        self.account_private_link.setPlaceholderText("Private server link")
+        form_layout.addWidget(QLabel("Private Server Link:"))
+        form_layout.addWidget(self.account_private_link)
+
+        # Place ID (for public servers)
+        self.account_place_id = QLineEdit()
+        self.account_place_id.setPlaceholderText("Place ID")
+        self.account_place_id_label = QLabel("Place ID:")
+        form_layout.addWidget(self.account_place_id_label)
+        form_layout.addWidget(self.account_place_id)
+
+        # Initially hide place ID fields
+        self.account_place_id_label.hide()
+        self.account_place_id.hide()
+
+        # Cookie
+        self.account_cookie = QLineEdit()
+        self.account_cookie.setPlaceholderText("ROBLOSECURITY cookie")
+        form_layout.addWidget(QLabel("Cookie:"))
+        form_layout.addWidget(self.account_cookie)
+
+        # Disabled checkbox
+        self.account_disabled = QCheckBox("Disable this account")
+        form_layout.addWidget(self.account_disabled)
+
+        # Buttons
+        button_layout = QHBoxLayout()
+        self.add_account_btn = QPushButton("Add Account")
+        self.add_account_btn.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {ModernStyle.PRIMARY};
+                color: white;
+                border: none;
+                padding: 8px 16px;
+                border-radius: 4px;
+                font-weight: bold;
+            }}
+            QPushButton:hover {{ background-color: {ModernStyle.PRIMARY_VARIANT}; }}
+        """)
+        self.add_account_btn.clicked.connect(self.add_account)
+        button_layout.addWidget(self.add_account_btn)
+
+        self.clear_form_btn = QPushButton("Clear")
+        self.clear_form_btn.clicked.connect(self.clear_account_form)
+        button_layout.addWidget(self.clear_form_btn)
+
+        form_layout.addLayout(button_layout)
+        form_layout.addStretch()
+
+        # Connect radio buttons to show/hide fields
+        self.account_private_radio.toggled.connect(self.on_account_server_type_changed)
+
+        main_layout.addWidget(form_widget)
+
+        # Right side - Account list
+        list_widget = QWidget()
+        list_layout = QVBoxLayout(list_widget)
+
+        list_title = QLabel("Existing Accounts")
+        list_title.setStyleSheet(f"""
+            QLabel {{
+                font-size: 14px;
+                font-weight: bold;
+                color: {ModernStyle.TEXT_PRIMARY};
+                padding: 5px 0;
+            }}
+        """)
+        list_layout.addWidget(list_title)
+
+        # Account list table
+        self.accounts_list = QTableWidget()
+        self.accounts_list.setColumnCount(6)
+        self.accounts_list.setHorizontalHeaderLabels([
+            "User ID", "Username", "Server Type", "Status", "Actions", "Delete"
+        ])
+
+        # Set column widths
+        header = self.accounts_list.horizontalHeader()
+        header.setSectionResizeMode(0, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(1, QHeaderView.ResizeMode.Fixed)  # Fixed width for username
+        header.setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        header.setSectionResizeMode(3, QHeaderView.ResizeMode.Stretch)  # Status - stretch to fill remaining space
+        header.setSectionResizeMode(4, QHeaderView.ResizeMode.Fixed)
+        header.setSectionResizeMode(5, QHeaderView.ResizeMode.Fixed)
+
+        self.accounts_list.setColumnWidth(1, 120)  # Username - smaller (about 1/3 less)
+        self.accounts_list.setColumnWidth(4, 90)   # Actions - more space for button
+        self.accounts_list.setColumnWidth(5, 80)   # Delete - more space for button
+
+        # Set bigger row height to accommodate buttons properly
+        self.accounts_list.verticalHeader().setDefaultSectionSize(35)
+
+        list_layout.addWidget(self.accounts_list)
+
+        main_layout.addWidget(list_widget)
+        layout.addLayout(main_layout)
+
+        self.tab_widget.addTab(accounts_widget, "Accounts")
+
+        # Load accounts into the list
+        self.refresh_accounts_list()
 
     def setup_processes_tab(self):
         processes_widget = QWidget()
@@ -1887,12 +2215,12 @@ class RobloxManagerGUI(QMainWindow):
         save_logs_btn.clicked.connect(self.save_logs)
         controls_layout.addWidget(save_logs_btn)
 
+        self.scan_trace_chk = QCheckBox("Show SCAN-TRACE messages")
+        self.scan_trace_chk.setChecked(False)
+        controls_layout.addWidget(self.scan_trace_chk)
+
         controls_layout.addStretch()
 
-        self.scan_trace_chk = QCheckBox("Show SCAN-TRACE messages", self)
-        self.scan_trace_chk.setChecked(False)      # default = ON
-        controls_layout.addWidget(self.scan_trace_chk)
-        
         self.auto_scroll_checkbox = QCheckBox("Auto-scroll")
         self.auto_scroll_checkbox.setChecked(True)
         controls_layout.addWidget(self.auto_scroll_checkbox)
@@ -1922,17 +2250,15 @@ class RobloxManagerGUI(QMainWindow):
 
         content_layout.addWidget(basic_group)
 
-        timing_group = QGroupBox("Timing Settings")
-        timing_layout = QFormLayout(timing_group)
-        
+        # Shutdown Settings
         timeout_group = QGroupBox("Shutdown Settings")
         timeout_layout = QFormLayout(timeout_group)
 
         self.settings_strap_threshold_input = QSpinBox()
         self.settings_strap_threshold_input.setRange(1, 200)
         self.settings_strap_threshold_input.setToolTip("Max number of strap.exe helpers before trimming")
-        timeout_layout.addRow("-Strap Limit:", self.settings_strap_threshold_input)
-        
+        timeout_layout.addRow("Strap Limit:", self.settings_strap_threshold_input)
+
         self.kill_timeout_input = QSpinBox()
         self.kill_timeout_input.setRange(60, 7200)
         self.kill_timeout_input.setSuffix(" s")
@@ -1942,7 +2268,7 @@ class RobloxManagerGUI(QMainWindow):
         self.poll_interval_input = QSpinBox()
         self.poll_interval_input.setRange(1, 120)
         self.poll_interval_input.setSuffix(" s")
-        self.poll_interval_input.setToolTip("Polling Interval + Kill After must stay under 1,800s")
+        self.poll_interval_input.setToolTip("How often to check for timeouts")
         timeout_layout.addRow("Poll Interval:", self.poll_interval_input)
 
         self.webhook_input = QLineEdit()
@@ -1956,12 +2282,15 @@ class RobloxManagerGUI(QMainWindow):
 
         content_layout.addWidget(timeout_group)
 
+        timing_group = QGroupBox("Timing Settings")
+        timing_layout = QFormLayout(timing_group)
+
         self.settings_offline_threshold_input = QSpinBox()
         self.settings_offline_threshold_input.setRange(10, 120)
         self.settings_offline_threshold_input.setSuffix(" s")
         self.settings_offline_threshold_input.setToolTip("How long to wait before restarting inactive users")
         timing_layout.addRow("Restart Inactive After:", self.settings_offline_threshold_input)
-        
+
         self.settings_initial_delay_input = QSpinBox()
         self.settings_initial_delay_input.setRange(5, 60)
         self.settings_initial_delay_input.setSuffix(" s")
@@ -1976,6 +2305,60 @@ class RobloxManagerGUI(QMainWindow):
 
         content_layout.addWidget(timing_group)
 
+        # Process Management Settings
+        process_group = QGroupBox("Process Management")
+        process_layout = QFormLayout(process_group)
+
+        self.settings_limit_strap_checkbox = QCheckBox()
+        self.settings_limit_strap_checkbox.setToolTip(
+            "Automatically limit strap.exe processes to only the oldest one. "
+            "This helps prevent multiple strap processes from running simultaneously."
+        )
+        process_layout.addRow("Limit Strap Processes:", self.settings_limit_strap_checkbox)
+
+        content_layout.addWidget(process_group)
+
+        updater_group = QGroupBox("Auto Updater")
+        updater_layout = QVBoxLayout(updater_group)
+
+        version_info_layout = QHBoxLayout()
+        version_label = QLabel(f"Current Version: {APP_VERSION}")
+        version_label.setStyleSheet(f"font-weight: bold; color: {ModernStyle.PRIMARY};")
+        version_info_layout.addWidget(version_label)
+        version_info_layout.addStretch()
+
+        self.update_status_label = QLabel("Click 'Check for Updates' to check for new versions")
+        self.update_status_label.setStyleSheet(f"color: {ModernStyle.TEXT_SECONDARY};")
+        version_info_layout.addWidget(self.update_status_label)
+        updater_layout.addLayout(version_info_layout)
+
+        update_buttons_layout = QHBoxLayout()
+
+        self.check_updates_btn = QPushButton("Check for Updates")
+        self.check_updates_btn.clicked.connect(self.check_for_updates)
+        update_buttons_layout.addWidget(self.check_updates_btn)
+
+        self.download_update_btn = QPushButton("Download Update")
+        self.download_update_btn.setProperty("class", "success")
+        self.download_update_btn.clicked.connect(self.download_update)
+        self.download_update_btn.setVisible(False)
+        update_buttons_layout.addWidget(self.download_update_btn)
+
+        update_buttons_layout.addStretch()
+        updater_layout.addLayout(update_buttons_layout)
+
+        self.update_progress = QProgressBar()
+        self.update_progress.setVisible(False)
+        updater_layout.addWidget(self.update_progress)
+
+        self.update_info_display = QTextEdit()
+        self.update_info_display.setMaximumHeight(100)
+        self.update_info_display.setReadOnly(True)
+        self.update_info_display.setVisible(False)
+        updater_layout.addWidget(self.update_info_display)
+
+        content_layout.addWidget(updater_group)
+
         buttons_layout = QHBoxLayout()
 
         save_settings_btn = QPushButton("Save Settings")
@@ -1986,7 +2369,7 @@ class RobloxManagerGUI(QMainWindow):
         reset_settings_btn = QPushButton("Reset to Defaults")
         reset_settings_btn.clicked.connect(self.reset_settings)
         buttons_layout.addWidget(reset_settings_btn)
-        
+
         clear_bad_btn = QPushButton("Clear Bad Flags")
         clear_bad_btn.clicked.connect(self._clear_bad_flags)
         buttons_layout.addWidget(clear_bad_btn)
@@ -2002,7 +2385,7 @@ class RobloxManagerGUI(QMainWindow):
         self.tab_widget.addTab(settings_widget, "Settings")
 
         self.load_settings_tab()
-        
+
     def setup_RAMEXPORT_tab(self):
         tab = QWidget()
         layout = QVBoxLayout(tab)
@@ -2027,17 +2410,8 @@ class RobloxManagerGUI(QMainWindow):
         self.merge_chk.setChecked(True)
         layout.addWidget(self.merge_chk)
 
-        self.replace_cookie_chk = QCheckBox("Overwrite existing cookies")
-        self.replace_ps_chk     = QCheckBox("Overwrite existing private-servers")
-
-        def _merge_toggled(checked: bool):          # checked is True / False
-            self.replace_cookie_chk.setEnabled(checked)
-            self.replace_ps_chk.setEnabled(checked)
-
-        self.merge_chk.toggled.connect(_merge_toggled)   # use toggled(bool)
-        _merge_toggled(self.merge_chk.isChecked())       # set initial state
-
-        layout.addWidget(self.replace_cookie_chk)
+        self.replace_ps_chk = QCheckBox("Replace private server links (otherwise keep existing)")
+        self.replace_ps_chk.setChecked(False)
         layout.addWidget(self.replace_ps_chk)
 
         # ── run button ─────────────────────────────────────────────
@@ -2048,7 +2422,145 @@ class RobloxManagerGUI(QMainWindow):
 
         layout.addStretch()
         self.tab_widget.addTab(tab, "RAM Export")
-        
+
+    def setup_donation_tab(self):
+        donation_widget = QWidget()
+        layout = QVBoxLayout(donation_widget)
+
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+
+        content_widget = QWidget()
+        content_layout = QVBoxLayout(content_widget)
+        content_layout.setSpacing(20)
+
+        title_label = QLabel("Support JARAM Development")
+        title_font = QFont()
+        title_font.setPointSize(24)
+        title_font.setBold(True)
+        title_label.setFont(title_font)
+        title_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        title_label.setStyleSheet(f"color: {ModernStyle.PRIMARY}; margin: 20px 0;")
+        content_layout.addWidget(title_label)
+
+        description_group = QGroupBox("Help Keep JARAM Free & Open Source")
+        description_layout = QVBoxLayout(description_group)
+
+        description_text = QLabel("""
+        JARAM is a free and open-source project developed by cresqnt.
+
+        All donations are voluntary and greatly appreciated! ❤️
+        """)
+        description_text.setWordWrap(True)
+        description_text.setStyleSheet(f"color: {ModernStyle.TEXT_PRIMARY}; font-size: 14px; padding: 10px;")
+        description_text.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        description_layout.addWidget(description_text)
+
+        content_layout.addWidget(description_group)
+
+        robux_group = QGroupBox("Donate Robux")
+        robux_layout = QVBoxLayout(robux_group)
+
+        robux_info = QLabel("Choose an amount to donate via Robux:")
+        robux_info.setStyleSheet(f"color: {ModernStyle.TEXT_PRIMARY}; font-weight: bold; margin-bottom: 15px;")
+        robux_layout.addWidget(robux_info)
+
+        grid_layout = QGridLayout()
+        grid_layout.setSpacing(10)
+
+        robux_amounts = [1, 2, 5, 10, 15, 20, 50, 100, 200, 300, 400, 500, 600, 750, 1000, 2000, 3000, 4000, 5000, 10000]
+
+        for i, amount in enumerate(robux_amounts):
+            row = i // 4
+            col = i % 4
+
+            donate_btn = QPushButton(f"{amount:,} R$")
+            donate_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: {ModernStyle.SECONDARY};
+                    color: {ModernStyle.TEXT_PRIMARY};
+                    border: none;
+                    padding: 8px 12px;
+                    border-radius: 8px;
+                    font-weight: bold;
+                    font-size: 13px;
+                    min-width: 100px;
+                    min-height: 32px;
+                }}
+                QPushButton:hover {{
+                    background-color: 
+                }}
+                QPushButton:pressed {{
+                    background-color: 
+                }}
+            """)
+            donate_btn.clicked.connect(lambda checked, amt=amount: self.open_robux_donation(amt))
+            grid_layout.addWidget(donate_btn, row, col)
+
+        robux_layout.addLayout(grid_layout)
+        content_layout.addWidget(robux_group)
+
+        content_layout.addStretch()
+
+        scroll_area.setWidget(content_widget)
+        layout.addWidget(scroll_area)
+
+        self.tab_widget.addTab(donation_widget, "Donate")
+
+    def open_robux_donation(self, amount):
+        """Open donation link for specified Robux amount"""
+
+        donation_urls = {
+            1: "https://www.roblox.com/game-pass/215081264/1-Robux",
+            2: "https://www.roblox.com/game-pass/215081387/2-Robux",
+            5: "https://www.roblox.com/game-pass/215081486/5-Robux",
+            10: "https://www.roblox.com/game-pass/215081540/10-Robux",
+            15: "https://www.roblox.com/game-pass/215081604/15-Robux",
+            20: "https://www.roblox.com/game-pass/215081699/20-Robux",
+            50: "https://www.roblox.com/game-pass/215081770/50-Robux",
+            100: "https://www.roblox.com/game-pass/215081864/100-Robux",
+            200: "https://www.roblox.com/game-pass/215081954/200-ROBUX",
+            300: "https://www.roblox.com/game-pass/215082141/300-ROBUX",
+            400: "https://www.roblox.com/game-pass/215082255/400-ROBUX",
+            500: "https://www.roblox.com/game-pass/215082386/500-ROBUX",
+            600: "https://www.roblox.com/game-pass/215082490/600-ROBUX",
+            750: "https://www.roblox.com/game-pass/215082588/750-ROBUX",
+            1000: "https://www.roblox.com/game-pass/215082721/1K-ROBUX",
+            2000: "https://www.roblox.com/game-pass/215082950/2K-ROBUX",
+            3000: "https://www.roblox.com/game-pass/215575837/3K-ROBUX",
+            4000: "https://www.roblox.com/game-pass/215575912/4K-ROBUX",
+            5000: "https://www.roblox.com/game-pass/215576007/5K-ROBUX",
+            10000: "https://www.roblox.com/game-pass/215576532/10K-ROBUX"
+        }
+
+        donation_url = donation_urls.get(amount)
+
+        if not donation_url:
+            QMessageBox.warning(self, "Error", f"No donation gamepass available for {amount:,} Robux.")
+            return
+
+        msg = QMessageBox(self)
+        msg.setWindowTitle("Robux Donation")
+        msg.setIcon(QMessageBox.Icon.Information)
+        msg.setText(f"Donate {amount:,} Robux")
+        msg.setInformativeText(
+            f"This will open the {amount:,} Robux gamepass in your browser.\n\n"
+            "Thank you for supporting JARAM development! ❤️"
+        )
+
+        open_button = msg.addButton("Open Gamepass", QMessageBox.ButtonRole.ActionRole)
+        msg.addButton(QMessageBox.StandardButton.Cancel)
+
+        result = msg.exec()
+
+        if msg.clickedButton() == open_button:
+            try:
+                import webbrowser
+                webbrowser.open(donation_url)
+            except Exception as e:
+                QMessageBox.warning(self, "Error", f"Failed to open gamepass: {e}")
+
     @staticmethod
     def _make_dev_card(name: str,
                     movie_bytes: bytes,
@@ -2056,7 +2568,8 @@ class RobloxManagerGUI(QMainWindow):
         card   = QWidget()
         layout = QVBoxLayout(card)
         layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        layout.setSpacing(15)
+        layout.setSpacing(8)
+        layout.setContentsMargins(5, 5, 5, 5)
 
         ring_px = 6                         # ← any thickness you want
 
@@ -2072,7 +2585,7 @@ class RobloxManagerGUI(QMainWindow):
         holder  = RoundMovieLabel(inner_d, 0, "transparent", parent=outer)
         holder.setFixedSize(inner_d, inner_d)
         holder.move(ring_px, ring_px)       # gap = ring thickness
-        
+
         try:
             buf = QBuffer()
             buf.setData(QByteArray(movie_bytes))
@@ -2129,30 +2642,54 @@ class RobloxManagerGUI(QMainWindow):
         title_label.setStyleSheet(f"color: {ModernStyle.PRIMARY}; margin: 20px 0;")
         content_layout.addWidget(title_label)
 
-        developer_group = QGroupBox("Developer")
+        team_group = QGroupBox("Development Team")
+        team_group.setStyleSheet("QGroupBox { margin: 5px; padding-top: 10px; }")
+        team_layout = QHBoxLayout(team_group)
+        team_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        team_layout.setSpacing(40)
+        team_layout.setContentsMargins(10, 5, 10, 10)
 
-        # ── Two dev cards, side-by-side ──────────────────────────────
-        developer_layout = QHBoxLayout(developer_group)
-        developer_layout.setAlignment(Qt.AlignmentFlag.AlignCenter)
-        developer_layout.setSpacing(40)
-
-        # — Jirach1 —
-        try:
-            bytes_j = Path(__file__).with_name("jirachi.gif").read_bytes()
-        except FileNotFoundError:
-            bytes_j = urlopen("https://kyl.neocities.org/jirachi.gif").read()
-
-        developer_layout.addWidget(self._make_dev_card("Jirach1", bytes_j))
-
-        # — cresqnt —
+        # — cresqnt (Developer) —
         try:
             bytes_c = Path(__file__).with_name("cresqnt.gif").read_bytes()
         except FileNotFoundError:
             bytes_c = urlopen("https://media1.tenor.com/m/CNBGgG2DU10AAAAd/nyan-cat-poptart.gif").read()
 
-        developer_layout.addWidget(self._make_dev_card("cresqnt",  bytes_c))
+        cresqnt_card = self._make_dev_card("cresqnt", bytes_c)
+        # Add a subtle label to indicate role
+        cresqnt_wrapper = QWidget()
+        cresqnt_wrapper_layout = QVBoxLayout(cresqnt_wrapper)
+        cresqnt_wrapper_layout.setSpacing(2)
+        cresqnt_wrapper_layout.setContentsMargins(0, 0, 0, 0)
+        cresqnt_wrapper_layout.addWidget(cresqnt_card)
+        role_label = QLabel("Developer")
+        role_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        role_label.setStyleSheet(f"color: {ModernStyle.TEXT_SECONDARY}; font-size: 11px; font-style: italic;")
+        cresqnt_wrapper_layout.addWidget(role_label)
 
-        content_layout.addWidget(developer_group)
+        team_layout.addWidget(cresqnt_wrapper)
+
+        # — Jirach1 (Contributor) —
+        try:
+            bytes_j = Path(__file__).with_name("jirachi.gif").read_bytes()
+        except FileNotFoundError:
+            bytes_j = urlopen("https://kyl.neocities.org/jirachi.gif").read()
+
+        jirach_card = self._make_dev_card("Jirach1", bytes_j)
+        # Add a subtle label to indicate role
+        jirach_wrapper = QWidget()
+        jirach_wrapper_layout = QVBoxLayout(jirach_wrapper)
+        jirach_wrapper_layout.setSpacing(2)
+        jirach_wrapper_layout.setContentsMargins(0, 0, 0, 0)
+        jirach_wrapper_layout.addWidget(jirach_card)
+        role_label2 = QLabel("Contributor")
+        role_label2.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        role_label2.setStyleSheet(f"color: {ModernStyle.TEXT_SECONDARY}; font-size: 11px; font-style: italic;")
+        jirach_wrapper_layout.addWidget(role_label2)
+
+        team_layout.addWidget(jirach_wrapper)
+
+        content_layout.addWidget(team_group)
 
         support_group = QGroupBox("Support")
         support_layout = QVBoxLayout(support_group)
@@ -2164,50 +2701,23 @@ class RobloxManagerGUI(QMainWindow):
         discord_btn = QPushButton("https://discord.gg/6cuCu6ymkX")
         discord_btn.setStyleSheet(f"""
             QPushButton {{
-                background-color: 
+                background-color:
                 color: white;
                 border: none;
-                padding: 12px 20px;
+                padding: 8px 16px;
                 border-radius: 6px;
                 font-weight: bold;
                 text-align: left;
             }}
             QPushButton:hover {{
-                background-color: 
+                background-color:
             }}
         """)
         discord_btn.clicked.connect(lambda: self.open_url("https://discord.gg/6cuCu6ymkX"))
         support_layout.addWidget(discord_btn)
 
-        content_layout.addWidget(support_group) 
-#---------------------------------------------------------------------------------------------------
-        support_group2 = QGroupBox("Additional") #lazy copy and paste...
-        support_layout2 = QVBoxLayout(support_group2)
+        content_layout.addWidget(support_group)
 
-        support_label2 = QLabel("The Best Glitch Hunt Server:")
-        support_label2.setStyleSheet(f"color: {ModernStyle.TEXT_PRIMARY}; font-weight: bold; margin-bottom: 5px;")
-        support_layout2.addWidget(support_label2)
-
-        discord_btn2 = QPushButton("https://discord.gg/YPvhKFTjEF")
-        discord_btn2.setStyleSheet(f"""
-            QPushButton {{
-                background-color: 
-                color: white;
-                border: none;
-                padding: 12px 20px;
-                border-radius: 6px;
-                font-weight: bold;
-                text-align: left;
-            }}
-            QPushButton:hover {{
-                background-color: 
-            }}
-        """)
-        discord_btn2.clicked.connect(lambda: self.open_url("https://discord.gg/YPvhKFTjEF"))
-        support_layout2.addWidget(discord_btn2)
-
-        content_layout.addWidget(support_group2)
-        
         license_group = QGroupBox("License | Legal")
         license_layout = QVBoxLayout(license_group)
 
@@ -2221,13 +2731,15 @@ class RobloxManagerGUI(QMainWindow):
 
         content_layout.addWidget(license_group)
 
+
+
         content_layout.addStretch()
 
         scroll_area.setWidget(content_widget)
         layout.addWidget(scroll_area)
 
         self.tab_widget.addTab(credits_widget, "Credits")
-        
+
     def execute_ram_import(self):
         base_url = f"http://127.0.0.1:{self.ram_port_input.text().strip() or '7963'}"
         params   = {
@@ -2239,21 +2751,22 @@ class RobloxManagerGUI(QMainWindow):
             params["Group"] = group_val
 
         try:
+            import requests
             r = requests.get(f"{base_url}/GetAccountsJson", params=params, timeout=15)
             if r.status_code == 200:
                 accounts_raw = r.json()
             elif r.status_code == 400:
-                raise RuntimeError("400 Bad Request – “Allow external connections” is OFF in Roblox Account Manager.")
+                raise RuntimeError("400 Bad Request – 'Allow external connections' is OFF in Roblox Account Manager.")
             elif r.status_code == 401:
                 raise RuntimeError("401 Unauthorized – Wrong Password")
             elif r.status_code == 404:
-                raise RuntimeError("404 Not Found – RAM endpoint missing on this port.")#
+                raise RuntimeError("404 Not Found – RAM endpoint missing on this port.")
             elif r.status_code == 500:
                 raise RuntimeError("500 Server Error – RAM threw an internal error.")
             else:
                 raise RuntimeError(f"{r.status_code} {r.reason} – RAM API request failed.")
 
-        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout) as net_err:
+        except (requests.exceptions.ConnectionError, requests.exceptions.Timeout):
             QMessageBox.critical(
                 self,
                 "Port / Connection Error",
@@ -2263,11 +2776,9 @@ class RobloxManagerGUI(QMainWindow):
                 "*NOTE: Roblox Account Manager must be restarted whenever you change the port.\n\n"
             )
             return
-
         except Exception as e:
             QMessageBox.critical(self, "Import Error", str(e))
             return
-
 
         new_users = transform(accounts_raw)        # -> JARAM user-dict
         if not new_users:
@@ -2277,29 +2788,26 @@ class RobloxManagerGUI(QMainWindow):
         # --- backup BEFORE touching users.json --------------------
         self.config_manager._create_backup(self.config_manager.users_file)
 
-        if not self.merge_chk.isChecked():
-            merged = new_users                       # full replace
+        if self.merge_chk.isChecked():
+            existing = self.config_manager.load_users()
+            merged = existing.copy()
+            for uid, data in new_users.items():
+                if uid in merged and not self.replace_ps_chk.isChecked():
+                    # keep existing private server link
+                    data["private_server_link"] = merged[uid].get("private_server_link", "")
+                merged[uid] = data
         else:
-            merged = self.config_manager.load_users()
-            for uid, info in new_users.items():
-                if uid not in merged:
-                    merged[uid] = info
-                else:                                # existing user
-                    if self.replace_cookie_chk.isChecked():
-                        merged[uid]["cookie"] = info.get("cookie", "")
-                        merged[uid]["bad"] = False
-                    if self.replace_ps_chk.isChecked():
-                        merged[uid]["private_server_link"] = info.get("private_server_link", "")
-                        merged[uid]["place"]               = info.get("place", "")
+            merged = new_users
 
         if self.config_manager.save_users(merged):
             QMessageBox.information(self, "Success",
                 f"Imported {len(new_users)} accounts.\n"
                 f"Total users.json entries: {len(merged)}")
-            self.add_log("RAM import complete — users.json updated.")
+            # Refresh the accounts list if we're on the accounts tab
+            if hasattr(self, 'refresh_accounts_list'):
+                self.refresh_accounts_list()
         else:
             QMessageBox.critical(self, "Save Error", "Failed to write users.json!")
-
 
     def open_url(self, url):
         import webbrowser
@@ -2309,14 +2817,108 @@ class RobloxManagerGUI(QMainWindow):
             QMessageBox.warning(self, "Error", f"Failed to open URL: {e}")
 
     def setup_timers(self):
-
+        # Reduced timer frequency to improve performance
         self.ui_timer = QTimer()
         self.ui_timer.timeout.connect(self.update_ui)
-        self.ui_timer.start(1000)  
+        self.ui_timer.start(2000)  # Update every 2 seconds instead of 1
 
         self.uptime_timer = QTimer()
         self.uptime_timer.timeout.connect(self.update_uptime)
-        self.uptime_timer.start(1000)
+        self.uptime_timer.start(1000)  # Keep uptime at 1 second for accuracy
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.resize_direction = self.get_resize_direction(event.position().toPoint())
+            if self.resize_direction:
+                self.resizing = True
+                self.resize_start_pos = event.globalPosition().toPoint()
+                self.resize_start_geometry = self.geometry()
+        super().mousePressEvent(event)
+
+    def mouseMoveEvent(self, event):
+        if not self.resizing:
+            # Update cursor based on position
+            direction = self.get_resize_direction(event.position().toPoint())
+            if direction:
+                if direction in ['top', 'bottom']:
+                    self.setCursor(Qt.CursorShape.SizeVerCursor)
+                elif direction in ['left', 'right']:
+                    self.setCursor(Qt.CursorShape.SizeHorCursor)
+                elif direction in ['top-left', 'bottom-right']:
+                    self.setCursor(Qt.CursorShape.SizeFDiagCursor)
+                elif direction in ['top-right', 'bottom-left']:
+                    self.setCursor(Qt.CursorShape.SizeBDiagCursor)
+            else:
+                self.setCursor(Qt.CursorShape.ArrowCursor)
+        else:
+            # Perform resize
+            self.perform_resize(event.globalPosition().toPoint())
+        super().mouseMoveEvent(event)
+
+    def mouseReleaseEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self.resizing = False
+            self.resize_direction = None
+            self.setCursor(Qt.CursorShape.ArrowCursor)
+        super().mouseReleaseEvent(event)
+
+    def get_resize_direction(self, pos):
+        margin = self.resize_margin
+        rect = self.rect()
+        
+        left = pos.x() <= margin
+        right = pos.x() >= rect.width() - margin
+        top = pos.y() <= margin
+        bottom = pos.y() >= rect.height() - margin
+        
+        if top and left:
+            return 'top-left'
+        elif top and right:
+            return 'top-right'
+        elif bottom and left:
+            return 'bottom-left'
+        elif bottom and right:
+            return 'bottom-right'
+        elif top:
+            return 'top'
+        elif bottom:
+            return 'bottom'
+        elif left:
+            return 'left'
+        elif right:
+            return 'right'
+        return None
+
+    def perform_resize(self, global_pos):
+        if not self.resize_direction:
+            return
+            
+        delta = global_pos - self.resize_start_pos
+        new_geometry = self.resize_start_geometry
+        
+        if 'left' in self.resize_direction:
+            new_geometry.setLeft(new_geometry.left() + delta.x())
+        if 'right' in self.resize_direction:
+            new_geometry.setRight(new_geometry.right() + delta.x())
+        if 'top' in self.resize_direction:
+            new_geometry.setTop(new_geometry.top() + delta.y())
+        if 'bottom' in self.resize_direction:
+            new_geometry.setBottom(new_geometry.bottom() + delta.y())
+            
+        # Enforce minimum size
+        min_width, min_height = 800, 600
+        if new_geometry.width() < min_width:
+            if 'left' in self.resize_direction:
+                new_geometry.setLeft(new_geometry.right() - min_width)
+            else:
+                new_geometry.setRight(new_geometry.left() + min_width)
+        if new_geometry.height() < min_height:
+            if 'top' in self.resize_direction:
+                new_geometry.setTop(new_geometry.bottom() - min_height)
+            else:
+                new_geometry.setBottom(new_geometry.top() + min_height)
+                
+        self.setGeometry(new_geometry)
 
     def start_manager(self):
         if self.worker_thread and self.worker_thread.isRunning():
@@ -2332,7 +2934,7 @@ class RobloxManagerGUI(QMainWindow):
             QMessageBox.critical(self, "Config Error", f"Error reading user configuration: {e}")
             return
 
-        self.worker_thread = WorkerThread(self.config_manager)
+        self.worker_thread = WorkerThread()
         self.worker_thread.log_signal.connect(self.add_log)
         self.worker_thread.status_signal.connect(self.update_user_status)
         self.worker_thread.process_signal.connect(self.update_process_data)
@@ -2367,140 +2969,174 @@ class RobloxManagerGUI(QMainWindow):
 
     def update_ui(self):
 
+        total_users = len(self.user_data)
         active_users = sum(1 for data in self.user_data.values() if data.get('status') == 'Active')
         total_processes = sum(len(data.get('pids', [])) for data in self.user_data.values())
         pending_restarts = sum(1 for data in self.user_data.values() if data.get('needs_restart', False))
-        users_cfg = self.config_manager.load_users()
-        good = [u for u, i in users_cfg.items() if not i.get("bad")]
 
-        self.total_users_label.setText(f"{len(good)}")
+        self.total_users_label.setText(str(total_users))
         self.active_users_label.setText(str(active_users))
         self.total_processes_label.setText(str(total_processes))
         self.pending_restarts_label.setText(str(pending_restarts))
 
     def update_user_status(self, status_data):
-        self.user_data = status_data
-        self.refresh_users()
+        # Only refresh if data has actually changed
+        if status_data != self._previous_user_data:
+            self.user_data = status_data
+            self.refresh_users()
+            self._previous_user_data = status_data.copy()
 
     def update_process_data(self, process_data):
-        self.process_data = process_data
-        self.refresh_processes()
+        # Only refresh if data has actually changed
+        if process_data != self._previous_process_data:
+            self.process_data = process_data
+            self.refresh_processes()
+            self._previous_process_data = process_data.copy()
 
     def refresh_users(self):
         self.users_table.setRowCount(len(self.user_data))
 
-        users_cfg = self.config_manager.load_users()
+        users_config = self.config_manager.load_users()
 
-        # good first, bad last
-        ordered = sorted(
-            self.user_data.items(),
-            key=lambda kv: bool(users_cfg.get(kv[0], {}).get("bad", False))
-        )
+        for row, (user_id, data) in enumerate(self.user_data.items()):
+            # Check if account is disabled
+            user_info = users_config.get(user_id, {})
+            is_disabled = user_info.get("disabled", False) if isinstance(user_info, dict) else False
 
-        for row, (user_id, runtime) in enumerate(ordered):
-            u_conf   = users_cfg.get(user_id, {})
-            bad_flag = bool(u_conf.get("bad", False))
-
-            # ── static columns ───────────────────────────────────────
-            username  = u_conf.get("username", f"User_{user_id}")
-            ps_link   = u_conf.get("private_server_link", "")
-            place     = u_conf.get("place", "")
-
+            # User ID column
             self.users_table.setItem(row, 0, QTableWidgetItem(user_id))
+
+            if isinstance(user_info, dict):
+                username = user_info.get("username", f"User_{user_id}")
+                server_type = user_info.get("server_type", "private")
+                private_server_link = user_info.get("private_server_link", "")
+                place_id = user_info.get("place_id", "")
+            else:
+                username = f"User_{user_id}"
+                server_type = "private"  # Legacy format defaults to private
+                private_server_link = ""
+                place_id = ""
+
+            # Username column
             self.users_table.setItem(row, 1, QTableWidgetItem(username))
 
-            trimmed_link = ps_link[:25] + "..." if len(ps_link) > 25 else ps_link
-            self.users_table.setItem(row, 2, QTableWidgetItem(trimmed_link))
-            self.users_table.setItem(row, 3, QTableWidgetItem(place))
+            # Server Type column
+            server_type_display = "Private" if server_type == "private" else "Public"
+            self.users_table.setItem(row, 2, QTableWidgetItem(server_type_display))
 
-            # ── status cell ──────────────────────────────────────────
-            if bad_flag:
-                status_text, colour = "Bad", QColor(ModernStyle.ERROR)
-            else:
-                raw = runtime.get("status", "Unknown")
-                if "Active" in raw:
-                    colour = QColor(ModernStyle.SECONDARY)
-                elif "Inactive" in raw:
-                    colour = QColor(ModernStyle.WARNING)
-                elif "Restarting" in raw:
-                    colour = QColor(ModernStyle.PRIMARY)
+            # Connection column - show appropriate connection info based on server type
+            if server_type == "private" and private_server_link:
+                if "roblox.com/share" in private_server_link:
+                    connection_display = "Share: " + private_server_link.split("?")[1][:20] + "..."
                 else:
-                    colour = QColor(ModernStyle.ERROR)
-                status_text = raw
+                    connection_display = private_server_link[:25] + "..." if len(private_server_link) > 25 else private_server_link
+            elif server_type == "public" and place_id:
+                connection_display = f"Place ID: {place_id}"
+            else:
+                connection_display = "Not configured"
+            self.users_table.setItem(row, 3, QTableWidgetItem(connection_display))
 
-            status_item = QTableWidgetItem(status_text)
-            status_item.setForeground(colour)
+            # Status column - show "Disabled" for disabled accounts or actual status
+            if is_disabled:
+                status_item = QTableWidgetItem("Disabled")
+                status_item.setForeground(QColor("#FF6666"))  # Light red
+            else:
+                status_item = QTableWidgetItem(data.get('status', 'Unknown'))
+                if 'Active' in data.get('status', ''):
+                    status_item.setForeground(QColor(ModernStyle.SECONDARY))
+                elif 'Inactive' in data.get('status', ''):
+                    status_item.setForeground(QColor(ModernStyle.WARNING))
+                elif 'Restarting' in data.get('status', ''):
+                    status_item.setForeground(QColor(ModernStyle.PRIMARY))
+                else:
+                    status_item.setForeground(QColor(ModernStyle.ERROR))
             self.users_table.setItem(row, 4, status_item)
 
-            # ── runtime columns ─────────────────────────────────────
-            pids = runtime.get('pids', [])
-            self.users_table.setItem(row, 5,
-                                    QTableWidgetItem(', '.join(map(str, pids)) or 'None'))
+            pids = data.get('pids', [])
+            pids_text = ', '.join(map(str, pids)) if pids else 'None'
+            self.users_table.setItem(row, 5, QTableWidgetItem(pids_text))
 
-            ttl_list = runtime.get('ttl', [])
-            self.users_table.setItem(row, 6,
-                                    QTableWidgetItem(', '.join(f"{t}s" for t in ttl_list) or 'N/A'))
+            last_active = data.get('last_active', 0)
+            if last_active > 0:
+                last_active_str = datetime.fromtimestamp(last_active).strftime("%H:%M:%S")
+            else:
+                last_active_str = "Never"
+            self.users_table.setItem(row, 6, QTableWidgetItem(last_active_str))
 
-            last_active = runtime.get('last_active', 0)
-            last_active_str = datetime.fromtimestamp(last_active).strftime("%H:%M:%S") if last_active else "Never"
-            self.users_table.setItem(row, 7, QTableWidgetItem(last_active_str))
+            actions_widget = QWidget()
+            actions_layout = QHBoxLayout(actions_widget)
+            actions_layout.setContentsMargins(2, 2, 2, 2)
+            actions_layout.setSpacing(2)
 
-            inactive_since = runtime.get('inactive_since')
-            dur = int(time.time() - inactive_since) if inactive_since else None
-            self.users_table.setItem(row, 8, QTableWidgetItem(f"{dur}s" if dur else "N/A"))
-
-            # ── action buttons ──────────────────────────────────────
-            actions_widget  = QWidget()
-            actions_layout  = QHBoxLayout(actions_widget)
-            actions_layout.setContentsMargins(8, 5, 8, 5)
-            actions_layout.setSpacing(12)
+            # Simple toggle button
+            if is_disabled:
+                toggle_btn = QPushButton("Enable")
+                toggle_btn.setStyleSheet(f"""
+                    QPushButton {{
+                        background-color: #4CAF50;
+                        color: white;
+                        border: none;
+                        padding: 2px 4px;
+                        border-radius: 2px;
+                        font-size: 8px;
+                        max-width: 40px;
+                        max-height: 18px;
+                    }}
+                    QPushButton:hover {{ background-color: #45a049; }}
+                """)
+            else:
+                toggle_btn = QPushButton("Disable")
+                toggle_btn.setStyleSheet(f"""
+                    QPushButton {{
+                        background-color: #f44336;
+                        color: white;
+                        border: none;
+                        padding: 2px 4px;
+                        border-radius: 2px;
+                        font-size: 8px;
+                        max-width: 40px;
+                        max-height: 18px;
+                    }}
+                    QPushButton:hover {{ background-color: #da190b; }}
+                """)
+            toggle_btn.clicked.connect(lambda checked, uid=user_id: self.toggle_user_enabled(uid))
+            actions_layout.addWidget(toggle_btn)
 
             restart_btn = QPushButton("Restart")
             restart_btn.setStyleSheet(f"""
                 QPushButton {{
                     background-color: {ModernStyle.PRIMARY};
-                    color: {ModernStyle.TEXT_PRIMARY};
+                    color: white;
                     border: none;
-                    padding: 4px 8px;
-                    border-radius: 4px;
-                    font-weight: 500;
-                    font-size: 11px;
-                    min-width: 40px;
-                    max-width: 50px;
-                    min-height: 26px;
-                    max-height: 28px;
+                    padding: 2px 4px;
+                    border-radius: 2px;
+                    font-size: 8px;
+                    max-width: 35px;
+                    max-height: 18px;
                 }}
-                QPushButton:hover {{
-                    background-color: {ModernStyle.ERROR};
-                }}
+                QPushButton:hover {{ background-color: {ModernStyle.PRIMARY_VARIANT}; }}
             """)
-            restart_btn.clicked.connect(lambda _, uid=user_id: self.restart_user_session(uid))
+            restart_btn.clicked.connect(lambda checked, uid=user_id: self.restart_user_session(uid))
             actions_layout.addWidget(restart_btn)
 
             kill_btn = QPushButton("Kill")
             kill_btn.setStyleSheet(f"""
                 QPushButton {{
                     background-color: {ModernStyle.ERROR};
-                    color: {ModernStyle.TEXT_PRIMARY};
+                    color: white;
                     border: none;
-                    padding: 4px 8px;
-                    border-radius: 4px;
-                    font-weight: 500;
-                    font-size: 11px;
-                    min-width: 40px;
-                    max-width: 50px;
-                    min-height: 26px;
-                    max-height: 28px;
+                    padding: 2px 4px;
+                    border-radius: 2px;
+                    font-size: 8px;
+                    max-width: 30px;
+                    max-height: 18px;
                 }}
-                QPushButton:hover {{
-                    background-color: {ModernStyle.ERROR};
-                }}
+                QPushButton:hover {{ background-color: #c62828; }}
             """)
-            kill_btn.clicked.connect(lambda _, uid=user_id: self.kill_user_processes(uid))
+            kill_btn.clicked.connect(lambda checked, uid=user_id: self.kill_user_processes(uid))
             actions_layout.addWidget(kill_btn)
 
-            self.users_table.setCellWidget(row, 9, actions_widget)
-
+            self.users_table.setCellWidget(row, 7, actions_widget)  # Updated column index
 
     def refresh_processes(self):
         self.processes_table.setRowCount(len(self.process_data))
@@ -2532,8 +3168,8 @@ class RobloxManagerGUI(QMainWindow):
                     font-size: 11px;
                     min-width: 50px;
                     max-width: 60px;
-                    min-height: 26px;
-                    max-height: 28px;
+                    min-height: 22px;
+                    max-height: 24px;
                 }}
                 QPushButton:hover {{
                     background-color: 
@@ -2546,8 +3182,7 @@ class RobloxManagerGUI(QMainWindow):
 
     def add_log(self, message):
         if message.startswith("[SCAN-TRACE]") and not self.scan_trace_chk.isChecked():
-            return    
-        print("add_log():", message)
+            return
         timestamp = datetime.now().strftime("%H:%M:%S")
         formatted_message = f"[{timestamp}] {message}"
 
@@ -2590,17 +3225,11 @@ class RobloxManagerGUI(QMainWindow):
 
         self.settings_window_limit_input.setValue(cfg.get("window_limit", 1))
 
-        self.settings_initial_delay_input.setValue(
-                cfg.get("timeouts", {}).get("initial_delay", 4))
-
-        self.settings_offline_threshold_input.setValue(
-                cfg.get("timeouts", {}).get("offline", 35))
-
-        self.settings_launch_delay_input.setValue(
-                cfg.get("timeouts", {}).get("launch_delay", 4))
-        
-        self.settings_strap_threshold_input.setValue(
-                cfg.get("timeouts", {}).get("strap_threshold", 50))
+        timeouts = cfg.get("timeouts", {})
+        self.settings_initial_delay_input.setValue(timeouts.get("initial_delay", 10))
+        self.settings_offline_threshold_input.setValue(timeouts.get("offline", 25))
+        self.settings_launch_delay_input.setValue(timeouts.get("launch_delay", 10))
+        self.settings_strap_threshold_input.setValue(timeouts.get("strap_threshold", 10))
 
         tm = cfg.get("timeout_monitor", {})
         self.kill_timeout_input.setValue(tm.get("kill_timeout", 1740))
@@ -2608,37 +3237,45 @@ class RobloxManagerGUI(QMainWindow):
         self.webhook_input.setText(tm.get("webhook_url", ""))
         self.ping_msg_input.setText(tm.get("ping_message", "<@YourPing> This message is sent whenever your active processes drop to 1 or 0, for debugging, leave webhook empty if not interested"))
 
+        process_management = cfg.get("process_management", {})
+        self.settings_limit_strap_checkbox.setChecked(process_management.get("limit_strap_processes", True))
+
     def save_settings(self):
         settings = {
             "window_limit": self.settings_window_limit_input.value(),
             "timeouts": {
                 "initial_delay": self.settings_initial_delay_input.value(),
-                "offline"      : self.settings_offline_threshold_input.value(),
-                "launch_delay" : self.settings_launch_delay_input.value(),
+                "offline": self.settings_offline_threshold_input.value(),
+                "launch_delay": self.settings_launch_delay_input.value(),
                 "strap_threshold": self.settings_strap_threshold_input.value(),
-
+                "kill_timeout": self.kill_timeout_input.value(),
+                "poll_interval": self.poll_interval_input.value(),
+                "webhook_url": self.webhook_input.text().strip(),
+                "ping_message": self.ping_msg_input.text().strip() or "<@YourPing> This message is sent whenever your active processes drop to 1 or 0, for debugging, leave webhook empty if not interested"
             },
-            "timeout_monitor": {                              # NEW block
-            "kill_timeout" : self.kill_timeout_input.value(),
-            "poll_interval": self.poll_interval_input.value(),
-            "webhook_url"  : self.webhook_input.text().strip(),
-            "ping_message" : self.ping_msg_input.text().strip() or "<@YourPing> This message is sent whenever your active processes drop to 1 or 0, for debugging. Leave webhook empty if not interested"
+            "timeout_monitor": {
+                "kill_timeout": self.kill_timeout_input.value(),
+                "poll_interval": self.poll_interval_input.value(),
+                "webhook_url": self.webhook_input.text().strip(),
+                "ping_message": self.ping_msg_input.text().strip() or "<@YourPing> This message is sent whenever your active processes drop to 1 or 0, for debugging, leave webhook empty if not interested"
+            },
+            "process_management": {
+                "limit_strap_processes": self.settings_limit_strap_checkbox.isChecked()
             }
         }
 
         if self.config_manager.save_settings(settings):
-            if self.worker_thread and self.worker_thread.isRunning():
-                self.worker_thread.apply_new_settings(settings)
+            if hasattr(self, 'worker_thread') and self.worker_thread and self.worker_thread.isRunning():
+                if hasattr(self.worker_thread, 'apply_new_settings'):
+                    self.worker_thread.apply_new_settings(settings)
             QMessageBox.information(self, "Success", "Settings saved and applied!")
         else:
             QMessageBox.critical(self, "Error", "Failed to save settings.")
 
-
-
     def reset_settings(self):
         """Load the hard-coded defaults from ConfigManager into the UI."""
-        defaults = self.config_manager.default_settings          # ← one source of truth
-        t        = defaults["timeouts"]                          # short alias
+        defaults = self.config_manager.default_settings
+        t = defaults["timeouts"]
 
         # ── basic limits ──────────────────────────────────────────
         self.settings_window_limit_input.setValue(defaults["window_limit"])
@@ -2661,17 +3298,273 @@ class RobloxManagerGUI(QMainWindow):
             self,
             "Reset Complete",
             "All settings have been restored to their default values.\n"
-            "Click “Save Settings” to confirm them."
+            "Click 'Save Settings' to confirm them."
         )
 
     def _clear_bad_flags(self):
         users = self.config_manager.load_users()
         for info in users.values():
-            info["bad"] = False
+            if isinstance(info, dict):
+                info["bad"] = False
         self.config_manager.save_users(users)
         QMessageBox.information(self, "Done", "All bad-cookie marks cleared.")
-        self.refresh_users()                # live update
-        self.load_settings_tab()            # if you show counts here
+        if hasattr(self, 'refresh_users'):
+            self.refresh_users()
+        self.load_settings_tab()
+
+    def check_for_updates(self):
+        """Check for updates from GitHub."""
+        try:
+            self.check_updates_btn.setEnabled(False)
+            self.check_updates_btn.setText("Checking...")
+            self.update_status_label.setText("Checking for updates...")
+
+            updater = AutoUpdater()
+
+            from PyQt6.QtCore import QThread, pyqtSignal
+
+            class UpdateChecker(QThread):
+                update_checked = pyqtSignal(dict)
+
+                def __init__(self, updater):
+                    super().__init__()
+                    self.updater = updater
+
+                def run(self):
+                    result = self.updater.check_for_updates()
+                    self.update_checked.emit(result or {})
+
+            self.update_checker = UpdateChecker(updater)
+            self.update_checker.update_checked.connect(self.on_update_checked)
+            self.update_checker.start()
+
+        except Exception as e:
+            self.check_updates_btn.setEnabled(True)
+            self.check_updates_btn.setText("Check for Updates")
+            self.update_status_label.setText(f"Error checking for updates: {str(e)}")
+
+    def on_update_checked(self, result):
+        """Handle the result of update check."""
+        try:
+            self.check_updates_btn.setEnabled(True)
+            self.check_updates_btn.setText("Check for Updates")
+
+            if not result:
+                self.update_status_label.setText("Failed to check for updates")
+                return
+
+            if result.get('available', False):
+                latest_version = result.get('latest_version', 'Unknown')
+                self.update_status_label.setText(f"Update available: v{latest_version}")
+                self.download_update_btn.setVisible(True)
+
+                release_notes = result.get('release_notes', '')
+                if release_notes:
+                    self.update_info_display.setPlainText(f"Release Notes for v{latest_version}:\n\n{release_notes}")
+                    self.update_info_display.setVisible(True)
+
+                self.pending_update = result
+
+            else:
+                latest_version = result.get('latest_version', 'Unknown')
+                self.update_status_label.setText(f"You have the latest version (v{latest_version})")
+                self.download_update_btn.setVisible(False)
+                self.update_info_display.setVisible(False)
+
+        except Exception as e:
+            self.update_status_label.setText(f"Error processing update check: {str(e)}")
+
+    def download_update(self):
+        """Download the available update."""
+        try:
+            if not hasattr(self, 'pending_update') or not self.pending_update:
+                QMessageBox.warning(self, "Error", "No update information available")
+                return
+
+            download_url = self.pending_update.get('download_url')
+            if not download_url:
+                QMessageBox.warning(self, "Error", "No download URL available")
+                return
+
+            latest_version = self.pending_update.get('latest_version', 'Unknown')
+            reply = QMessageBox.question(
+                self,
+                "Download Update",
+                f"Download and install update to version {latest_version}?\n\n"
+                "The application will need to restart to apply the update.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+
+            if reply != QMessageBox.StandardButton.Yes:
+                return
+
+            self.download_update_btn.setEnabled(False)
+            self.download_update_btn.setText("Downloading...")
+            self.update_progress.setVisible(True)
+            self.update_progress.setValue(0)
+
+            from PyQt6.QtCore import QThread, pyqtSignal
+
+            class UpdateDownloader(QThread):
+                progress_updated = pyqtSignal(int)
+                download_completed = pyqtSignal(str)
+                download_failed = pyqtSignal(str)
+
+                def __init__(self, updater, download_url):
+                    super().__init__()
+                    self.updater = updater
+                    self.download_url = download_url
+
+                def run(self):
+                    try:
+                        def progress_callback(progress):
+                            self.progress_updated.emit(int(progress))
+
+                        file_path = self.updater.download_update(self.download_url, progress_callback)
+                        if file_path:
+                            self.download_completed.emit(file_path)
+                        else:
+                            self.download_failed.emit("Download failed")
+                    except Exception as e:
+                        self.download_failed.emit(str(e))
+
+            self.update_downloader = UpdateDownloader(AutoUpdater(), download_url)
+            self.update_downloader.progress_updated.connect(self.update_progress.setValue)
+            self.update_downloader.download_completed.connect(self.on_download_completed)
+            self.update_downloader.download_failed.connect(self.on_download_failed)
+            self.update_downloader.start()
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to start download: {str(e)}")
+            self.download_update_btn.setEnabled(True)
+            self.download_update_btn.setText("Download Update")
+            self.update_progress.setVisible(False)
+
+    def on_download_completed(self, file_path):
+        """Handle successful download completion."""
+        try:
+            self.update_progress.setVisible(False)
+            self.download_update_btn.setEnabled(True)
+            self.download_update_btn.setText("Download Update")
+
+            reply = QMessageBox.question(
+                self,
+                "Update Downloaded",
+                "Update downloaded successfully!\n\n"
+                "Would you like to apply the update now?\n"
+                "The application will close and restart.",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+
+            if reply == QMessageBox.StandardButton.Yes:
+                self.apply_update(file_path)
+            else:
+                QMessageBox.information(
+                    self,
+                    "Update Ready",
+                    f"Update has been downloaded to:\n{file_path}\n\n"
+                    "You can apply it later by restarting the application."
+                )
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Error handling download completion: {str(e)}")
+
+    def on_download_failed(self, error_message):
+        """Handle download failure."""
+        self.update_progress.setVisible(False)
+        self.download_update_btn.setEnabled(True)
+        self.download_update_btn.setText("Download Update")
+        QMessageBox.critical(self, "Download Failed", f"Failed to download update:\n{error_message}")
+
+    def apply_update(self, update_file):
+        """Apply the downloaded update."""
+        try:
+            updater = AutoUpdater()
+
+            if self.worker_thread and self.worker_thread.isRunning():
+                self.stop_manager()
+                time.sleep(2)  
+
+            if updater.apply_update(update_file):
+                QMessageBox.information(
+                    self,
+                    "Update Applied",
+                    "Update has been applied successfully!\n"
+                    "The application will now restart."
+                )
+
+                import subprocess
+                import sys
+                subprocess.Popen([sys.executable] + sys.argv)
+                self.close()
+            else:
+                QMessageBox.critical(
+                    self,
+                    "Update Failed",
+                    "Failed to apply the update. Please try again or update manually."
+                )
+
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Error applying update: {str(e)}")
+
+    def check_for_updates_on_startup(self):
+        """Check for updates automatically on startup."""
+        try:
+
+            from PyQt6.QtCore import QThread, pyqtSignal
+
+            class StartupUpdateChecker(QThread):
+                update_found = pyqtSignal(dict)
+
+                def __init__(self, updater):
+                    super().__init__()
+                    self.updater = updater
+
+                def run(self):
+                    try:
+                        result = self.updater.check_for_updates(timeout=5)
+                        if result and result.get('available', False):
+                            self.update_found.emit(result)
+                    except Exception:
+                        pass  
+
+            self.startup_checker = StartupUpdateChecker(self.auto_updater)
+            self.startup_checker.update_found.connect(self.on_startup_update_found)
+            self.startup_checker.start()
+
+        except Exception:
+            pass  
+
+    def on_startup_update_found(self, update_info):
+        """Handle when an update is found on startup."""
+        try:
+            latest_version = update_info.get('latest_version', 'Unknown')
+            current_version = update_info.get('current_version', APP_VERSION)
+
+            reply = QMessageBox.question(
+                self,
+                "Update Available",
+                f"A new version of JARAM is available!\n\n"
+                f"Current Version: {current_version}\n"
+                f"Latest Version: {latest_version}\n\n"
+                f"Would you like to go to the Settings tab to download it?",
+                QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No
+            )
+
+            if reply == QMessageBox.StandardButton.Yes:
+
+                self.tab_widget.setCurrentIndex(4)  
+                self.pending_update = update_info
+                self.update_status_label.setText(f"Update available: v{latest_version}")
+                self.download_update_btn.setVisible(True)
+
+                release_notes = update_info.get('release_notes', '')
+                if release_notes:
+                    self.update_info_display.setPlainText(f"Release Notes for v{latest_version}:\n\n{release_notes}")
+                    self.update_info_display.setVisible(True)
+
+        except Exception as e:
+            pass  
 
     def show_config_location(self):
         config_info = self.config_manager.get_config_info()
@@ -2702,11 +3595,9 @@ class RobloxManagerGUI(QMainWindow):
     def show_about(self):
         config_info = self.config_manager.get_config_info()
         QMessageBox.about(self, "About JARAM",
-                         "JARAM X Jirach1(Just Another Roblox Account Manager) v1.1\n\n"
+                         f"JARAM(Just Another Roblox Account Manager) v{APP_VERSION}\n\n"
                          "Advanced multi-account Roblox session manager\n"
                          "with automated presence monitoring and process management.\n\n"
-                         "Built with PyQt6 and modern design principles.\n\n"
-                         "Jirach1 was here.\n\n"
                          f"Configuration stored in:\n{config_info['config_dir']}")
 
     def restart_all_sessions(self):
@@ -2718,20 +3609,9 @@ class RobloxManagerGUI(QMainWindow):
                                    "Are you sure you want to restart all sessions?",
                                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         if reply == QMessageBox.StandardButton.Yes:
-            restartables = [
-                user_id
-                for user_id, state in self.worker_thread.user_states.items()
-                if not state["user_info"].get("bad", False)
-            ]
+            for user_id in self.user_data.keys():
+                self.worker_thread.restart_user_session(user_id)
 
-            def delayed_restart():
-                for i, user_id in enumerate(restartables):
-                    delay = i * self.worker_thread.launcher.launch_delay
-                    QTimer.singleShot(delay * 1000, lambda uid=user_id: self.worker_thread.restart_user_session(uid))
-
-            self.add_log(f"Queued restart for {len(restartables)} sessions using delay={self.worker_thread.launcher.launch_delay}s")
-            delayed_restart()
-            
     def kill_all_processes(self):
         if not self.worker_thread or not self.worker_thread.isRunning():
             QMessageBox.warning(self, "Manager Not Running", "Please start the manager first.")
@@ -2757,6 +3637,328 @@ class RobloxManagerGUI(QMainWindow):
 
         self.worker_thread.restart_user_session(user_id)
 
+    def show_user_context_menu(self, position):
+        """Show context menu for user table right-click"""
+        item = self.users_table.itemAt(position)
+        if item is None:
+            return
+
+        row = item.row()
+        if row >= len(list(self.user_data.keys())):
+            return
+
+        user_id = list(self.user_data.keys())[row]
+        users_config = self.config_manager.load_users()
+        user_info = users_config.get(user_id, {})
+        is_disabled = user_info.get("disabled", False) if isinstance(user_info, dict) else False
+
+        from PyQt6.QtWidgets import QMenu
+        menu = QMenu(self)
+
+        # Toggle enable/disable action
+        if is_disabled:
+            enable_action = menu.addAction("🔓 Enable Account")
+            enable_action.triggered.connect(lambda: self.toggle_user_enabled(user_id))
+        else:
+            disable_action = menu.addAction("🔒 Disable Account")
+            disable_action.triggered.connect(lambda: self.toggle_user_enabled(user_id))
+
+        menu.addSeparator()
+
+        # Other actions
+        restart_action = menu.addAction("🔄 Restart Session")
+        restart_action.triggered.connect(lambda: self.restart_user_session(user_id))
+
+        kill_action = menu.addAction("💀 Kill Processes")
+        kill_action.triggered.connect(lambda: self.kill_user_processes(user_id))
+
+        # Show menu at cursor position
+        menu.exec(self.users_table.mapToGlobal(position))
+
+    def on_account_server_type_changed(self):
+        """Handle server type radio button changes"""
+        if self.account_private_radio.isChecked():
+            self.account_place_id_label.hide()
+            self.account_place_id.hide()
+        else:
+            self.account_place_id_label.show()
+            self.account_place_id.show()
+
+    def clear_account_form(self):
+        """Clear all form fields"""
+        self.account_user_id.clear()
+        self.account_username.clear()
+        self.account_private_link.clear()
+        self.account_place_id.clear()
+        self.account_cookie.clear()
+        self.account_disabled.setChecked(False)
+        self.account_private_radio.setChecked(True)
+        self.on_account_server_type_changed()
+
+    def add_account(self):
+        """Add a new account"""
+        user_id = self.account_user_id.text().strip()
+        username = self.account_username.text().strip()
+        private_link = self.account_private_link.text().strip()
+        place_id = self.account_place_id.text().strip()
+        cookie = self.account_cookie.text().strip()
+        disabled = self.account_disabled.isChecked()
+
+        server_type = "private" if self.account_private_radio.isChecked() else "public"
+
+        # Validation
+        if not user_id:
+            QMessageBox.warning(self, "Error", "User ID is required!")
+            return
+
+        if not username:
+            username = f"User_{user_id}"
+
+        if not cookie:
+            QMessageBox.warning(self, "Error", "Cookie is required!")
+            return
+
+        if server_type == "private" and not private_link:
+            QMessageBox.warning(self, "Error", "Private server link is required for private servers!")
+            return
+
+        if server_type == "public" and not place_id:
+            QMessageBox.warning(self, "Error", "Place ID is required for public servers!")
+            return
+
+        # Check if user already exists
+        users_config = self.config_manager.load_users()
+        if user_id in users_config:
+            QMessageBox.warning(self, "Error", f"User {user_id} already exists!")
+            return
+
+        # Create account data
+        account_data = {
+            "username": username,
+            "server_type": server_type,
+            "private_server_link": private_link if server_type == "private" else "",
+            "place_id": place_id if server_type == "public" else "",
+            "cookie": cookie,
+            "disabled": disabled
+        }
+
+        # Save account
+        users_config[user_id] = account_data
+        if self.config_manager.save_users(users_config):
+            QMessageBox.information(self, "Success", f"Account {user_id} ({username}) added successfully!")
+            self.clear_account_form()
+            self.refresh_accounts_list()
+            self.refresh_users()  # Refresh the users tab too
+        else:
+            QMessageBox.critical(self, "Error", "Failed to save account!")
+
+    def refresh_accounts_list(self):
+        """Refresh the accounts list table"""
+        users_config = self.config_manager.load_users()
+        self.accounts_list.setRowCount(len(users_config))
+
+        for row, (user_id, user_info) in enumerate(users_config.items()):
+            if isinstance(user_info, dict):
+                username = user_info.get("username", f"User_{user_id}")
+                server_type = user_info.get("server_type", "private")
+                disabled = user_info.get("disabled", False)
+            else:
+                username = f"User_{user_id}"
+                server_type = "private"
+                disabled = False
+
+            # User ID
+            self.accounts_list.setItem(row, 0, QTableWidgetItem(user_id))
+
+            # Username
+            self.accounts_list.setItem(row, 1, QTableWidgetItem(username))
+
+            # Server Type
+            self.accounts_list.setItem(row, 2, QTableWidgetItem(server_type.title()))
+
+            # Status
+            status = "Disabled" if disabled else "Enabled"
+            status_item = QTableWidgetItem(status)
+            if disabled:
+                status_item.setForeground(QColor("#FF6666"))
+            else:
+                status_item.setForeground(QColor("#66FF66"))
+            self.accounts_list.setItem(row, 3, status_item)
+
+            # Edit button - simplified approach without wrapper widget
+            edit_btn = QPushButton("Edit")
+            edit_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: {ModernStyle.PRIMARY};
+                    color: white;
+                    border: none;
+                    padding: 2px 4px;
+                    border-radius: 3px;
+                    font-size: 8px;
+                    font-weight: bold;
+                    min-width: 50px;
+                    max-width: 80px;
+                    min-height: 18px;
+                    max-height: 22px;
+                }}
+                QPushButton:hover {{ background-color: {ModernStyle.PRIMARY_VARIANT}; }}
+            """)
+            edit_btn.clicked.connect(lambda checked, uid=user_id: self.edit_account(uid))
+            self.accounts_list.setCellWidget(row, 4, edit_btn)
+
+            # Delete button - simplified approach without wrapper widget
+            delete_btn = QPushButton("Del")
+            delete_btn.setStyleSheet(f"""
+                QPushButton {{
+                    background-color: #f44336;
+                    color: white;
+                    border: none;
+                    padding: 2px 4px;
+                    border-radius: 3px;
+                    font-size: 8px;
+                    font-weight: bold;
+                    min-width: 40px;
+                    max-width: 70px;
+                    min-height: 18px;
+                    max-height: 22px;
+                }}
+                QPushButton:hover {{ background-color: #da190b; }}
+            """)
+            delete_btn.clicked.connect(lambda checked, uid=user_id: self.delete_account(uid))
+            self.accounts_list.setCellWidget(row, 5, delete_btn)
+
+    def edit_account(self, user_id):
+        """Edit an existing account"""
+        users_config = self.config_manager.load_users()
+        user_info = users_config.get(user_id, {})
+
+        if isinstance(user_info, dict):
+            # Fill form with existing data
+            self.account_user_id.setText(user_id)
+            self.account_user_id.setEnabled(False)  # Don't allow changing user ID
+            self.account_username.setText(user_info.get("username", f"User_{user_id}"))
+            self.account_private_link.setText(user_info.get("private_server_link", ""))
+            self.account_place_id.setText(user_info.get("place_id", ""))
+            self.account_cookie.setText(user_info.get("cookie", ""))
+            self.account_disabled.setChecked(user_info.get("disabled", False))
+
+            server_type = user_info.get("server_type", "private")
+            if server_type == "public":
+                self.account_public_radio.setChecked(True)
+            else:
+                self.account_private_radio.setChecked(True)
+            self.on_account_server_type_changed()
+
+            # Change button text
+            self.add_account_btn.setText("Update Account")
+            self.add_account_btn.clicked.disconnect()
+            self.add_account_btn.clicked.connect(lambda: self.update_account(user_id))
+
+    def update_account(self, user_id):
+        """Update an existing account"""
+        username = self.account_username.text().strip()
+        private_link = self.account_private_link.text().strip()
+        place_id = self.account_place_id.text().strip()
+        cookie = self.account_cookie.text().strip()
+        disabled = self.account_disabled.isChecked()
+
+        server_type = "private" if self.account_private_radio.isChecked() else "public"
+
+        # Validation
+        if not username:
+            username = f"User_{user_id}"
+
+        if not cookie:
+            QMessageBox.warning(self, "Error", "Cookie is required!")
+            return
+
+        if server_type == "private" and not private_link:
+            QMessageBox.warning(self, "Error", "Private server link is required for private servers!")
+            return
+
+        if server_type == "public" and not place_id:
+            QMessageBox.warning(self, "Error", "Place ID is required for public servers!")
+            return
+
+        # Update account data
+        users_config = self.config_manager.load_users()
+        users_config[user_id] = {
+            "username": username,
+            "server_type": server_type,
+            "private_server_link": private_link if server_type == "private" else "",
+            "place_id": place_id if server_type == "public" else "",
+            "cookie": cookie,
+            "disabled": disabled
+        }
+
+        # Save account
+        if self.config_manager.save_users(users_config):
+            QMessageBox.information(self, "Success", f"Account {user_id} ({username}) updated successfully!")
+            self.clear_account_form()
+            self.account_user_id.setEnabled(True)
+            self.add_account_btn.setText("Add Account")
+            self.add_account_btn.clicked.disconnect()
+            self.add_account_btn.clicked.connect(self.add_account)
+            self.refresh_accounts_list()
+            self.refresh_users()  # Refresh the users tab too
+        else:
+            QMessageBox.critical(self, "Error", "Failed to update account!")
+
+    def delete_account(self, user_id):
+        """Delete an account"""
+        reply = QMessageBox.question(self, "Confirm Delete",
+                                   f"Are you sure you want to delete account {user_id}?",
+                                   QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+
+        if reply == QMessageBox.StandardButton.Yes:
+            users_config = self.config_manager.load_users()
+            if user_id in users_config:
+                del users_config[user_id]
+                if self.config_manager.save_users(users_config):
+                    QMessageBox.information(self, "Success", f"Account {user_id} deleted successfully!")
+                    self.refresh_accounts_list()
+                    self.refresh_users()  # Refresh the users tab too
+                else:
+                    QMessageBox.critical(self, "Error", "Failed to delete account!")
+
+    def toggle_user_enabled(self, user_id):
+        """Toggle the enabled/disabled status of a user account"""
+        try:
+            users_config = self.config_manager.load_users()
+            if user_id in users_config:
+                user_info = users_config[user_id]
+                if isinstance(user_info, dict):
+                    # Toggle the disabled status
+                    current_disabled = user_info.get("disabled", False)
+                    user_info["disabled"] = not current_disabled
+
+                    # Save the updated configuration
+                    if self.config_manager.save_users(users_config):
+                        # If we're disabling the account, kill its processes
+                        if user_info["disabled"]:
+                            if self.worker_thread and self.worker_thread.isRunning():
+                                self.worker_thread.kill_user_processes(user_id)
+
+                        # Refresh the display
+                        self.refresh_users()
+
+                        status = "disabled" if user_info["disabled"] else "enabled"
+                        QMessageBox.information(self, "Account Status Changed",
+                                              f"Account {user_id} has been {status}.")
+                        return True
+                    else:
+                        QMessageBox.critical(self, "Error", "Failed to save account configuration.")
+                        return False
+                else:
+                    QMessageBox.warning(self, "Error", "Cannot modify legacy account format. Please update account configuration.")
+                    return False
+            else:
+                QMessageBox.warning(self, "Error", f"Account {user_id} not found.")
+                return False
+        except Exception as e:
+            QMessageBox.critical(self, "Error", f"Failed to toggle account status: {e}")
+            return False
+
     def kill_user_processes(self, user_id):
         if not self.worker_thread or not self.worker_thread.isRunning():
             QMessageBox.warning(self, "Manager Not Running", "Please start the manager first.")
@@ -2778,8 +3980,8 @@ class RobloxManagerGUI(QMainWindow):
                                    QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
         if reply == QMessageBox.StandardButton.Yes:
             if self.worker_thread.process_mgr:
-                self.worker_thread.process_mgr.terminate_process(
-                    int(pid), self.worker_thread.manager.process_tracker
+                self.worker_thread.process_mgr.eliminate_process(
+                    int(pid), self.worker_thread.manager.process_monitor
                 )
 
     def kill_selected_process(self):
@@ -2797,25 +3999,52 @@ class RobloxManagerGUI(QMainWindow):
                                        QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
             if reply == QMessageBox.StandardButton.Yes:
                 self.stop_manager()
+                self._cleanup_resources()
                 event.accept()
             else:
                 event.ignore()
         else:
+            self._cleanup_resources()
             event.accept()
-            
+
+    def _cleanup_resources(self):
+        """Clean up resources to prevent memory leaks"""
+        # Stop timers
+        if hasattr(self, 'ui_timer'):
+            self.ui_timer.stop()
+        if hasattr(self, 'uptime_timer'):
+            self.uptime_timer.stop()
+
+        # Clear caches
+        self._previous_user_data.clear()
+        self._previous_process_data.clear()
+
+        # Clear style cache
+        ModernStyle._style_cache.clear()
 
 def main():
     app = QApplication(sys.argv)
 
     app.setApplicationName("JARAM")
-    app.setApplicationVersion("1.1")
+    app.setApplicationVersion(APP_VERSION)
     app.setOrganizationName("cresqnt")
 
+    # Set application icon
     icon_path = _get_icon_path()
     if icon_path and os.path.exists(icon_path):
-        app.setWindowIcon(QIcon(icon_path))
+        icon = QIcon(icon_path)
+        app.setWindowIcon(icon)
+        print(f"Set application icon from: {icon_path}")
+    else:
+        print("Could not set application icon - file not found")
 
     window = RobloxManagerGUI()
+    
+    # Also set the window icon specifically
+    if icon_path and os.path.exists(icon_path):
+        window.setWindowIcon(QIcon(icon_path))
+        print(f"Set window icon from: {icon_path}")
+    
     window.show()
 
     sys.exit(app.exec())
