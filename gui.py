@@ -5,7 +5,6 @@ import os
 import shutil
 from datetime import datetime
 from pathlib import Path
-from urllib.request import urlopen
 from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout,
                             QHBoxLayout, QGridLayout, QTabWidget, QTableWidget,
                             QTableWidgetItem, QPushButton, QLabel, QLineEdit,
@@ -181,15 +180,15 @@ class ConfigManager:
         try:
             if self.settings_file.exists():
                 with open(self.settings_file, 'r', encoding='utf-8') as f:
-                    loaded = json.load(f)
+                    loaded_settings = json.load(f)
 
-                settings = json.loads(json.dumps(self.default_settings))  # deep copy
-                settings = self._deep_update(settings, loaded)
-                return settings
+                    settings = self.default_settings.copy()
+                    settings.update(loaded_settings)
+                    return settings
             else:
-                return json.loads(json.dumps(self.default_settings))
-        except Exception:
-            return json.loads(json.dumps(self.default_settings))
+                return self.default_settings.copy()
+        except Exception as e:
+            return self.default_settings.copy()
 
     def save_settings(self, settings_data):
         try:
@@ -2286,8 +2285,8 @@ class RobloxManagerGUI(QMainWindow):
         timing_layout = QFormLayout(timing_group)
 
         self.settings_offline_threshold_input = QSpinBox()
-        self.settings_offline_threshold_input.setRange(10, 120)
-        self.settings_offline_threshold_input.setSuffix(" s")
+        self.settings_offline_threshold_input.setRange(15, 120)
+        self.settings_offline_threshold_input.setSuffix(" seconds")
         self.settings_offline_threshold_input.setToolTip("How long to wait before restarting inactive users")
         timing_layout.addRow("Restart Inactive After:", self.settings_offline_threshold_input)
 
@@ -2298,8 +2297,8 @@ class RobloxManagerGUI(QMainWindow):
         timing_layout.addRow("Initial Launch Delay:", self.settings_initial_delay_input)
 
         self.settings_launch_delay_input = QSpinBox()
-        self.settings_launch_delay_input.setRange(1, 120)
-        self.settings_launch_delay_input.setSuffix(" s")
+        self.settings_launch_delay_input.setRange(2, 15)
+        self.settings_launch_delay_input.setSuffix(" seconds")
         self.settings_launch_delay_input.setToolTip("Delay between launching sessions")
         timing_layout.addRow("Launch Delay:", self.settings_launch_delay_input)
 
@@ -3221,9 +3220,9 @@ class RobloxManagerGUI(QMainWindow):
         self.tab_widget.setCurrentIndex(4)
 
     def load_settings_tab(self):
-        cfg = self.config_manager.load_settings()
+        settings = self.config_manager.load_settings()
 
-        self.settings_window_limit_input.setValue(cfg.get("window_limit", 1))
+        self.settings_window_limit_input.setValue(settings.get("window_limit", 1))
 
         timeouts = cfg.get("timeouts", {})
         self.settings_initial_delay_input.setValue(timeouts.get("initial_delay", 10))
@@ -3270,7 +3269,7 @@ class RobloxManagerGUI(QMainWindow):
                     self.worker_thread.apply_new_settings(settings)
             QMessageBox.information(self, "Success", "Settings saved and applied!")
         else:
-            QMessageBox.critical(self, "Error", "Failed to save settings.")
+            QMessageBox.critical(self, "Error", "Failed to save settings. Please check the logs for details.")
 
     def reset_settings(self):
         """Load the hard-coded defaults from ConfigManager into the UI."""
