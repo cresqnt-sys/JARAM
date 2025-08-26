@@ -1792,7 +1792,7 @@ class RobloxManagerGUI(QMainWindow):
         self.setup_timers()
 
     def setup_ui(self):
-        self.setWindowTitle("Just Another Roblox Account Manager 1.1")
+        self.setWindowTitle("Just Another Roblox Account Manager 1.1.1")
         self.setGeometry(100, 100, 1200, 800)
         
         # Remove default window frame and title bar
@@ -1823,7 +1823,7 @@ class RobloxManagerGUI(QMainWindow):
 
         header_layout = QHBoxLayout()
 
-        title_label = QLabel("JARAM - Just Another Roblox Account Manager 1.1")
+        title_label = QLabel("JARAM - Just Another Roblox Account Manager 1.1.1")
         title_font = QFont()
         title_font.setPointSize(18)
         title_font.setBold(True)
