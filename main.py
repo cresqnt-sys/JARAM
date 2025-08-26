@@ -22,7 +22,7 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-APP_VERSION = "1.1.0"
+APP_VERSION = "1.1.1"
 
 try:
     from gui import ConfigManager
